@@ -10,21 +10,106 @@ from lmfit import Parameter, Parameters
 import os.path
 
 
-class BrushPara(AnalyticalReflectivityFunction):
+class Brush(AnalyticalReflectivityFunction):
     """
 
     """
+    gen_par = ['scale', 'bkg',
+               'SLD_super', 'SLD_sub', 'thickness_SiO2', 'SLD_SiO2',
+               'roughness_SiO2', 'roughness_backing']
 
-    def __init__(self, sld_poly, n_interior, *args,
-                 n_slices=50, **kwds):
+    def __init__(self, sld_poly, n_interior, *args, n_slices=50,
+              vol_cut=0.005, **kwds):
+        super(Brush, self).__init__(*args, **kwds)
+        self.n_interior = n_interior
+        self.n_slices = n_slices
+        self.sld_poly = sld_poly
+        self.vol_cut = vol_cut
+
+
+    def vol_fraction(self, params):
+        """
+        Calculates SLD profile and sets boundary between SiO2 and polymer to
+        z = 0. Then calculates volume fraction profile from additive mixing of
+        SLD Some guff here
+        Parameters
+        ----------
+        params: lmfit.Parameters instance
+            The parameters for this analytic profile
+        Returns
+        -------
+        z: z value for volume fraction profile
+        profile: phi values for volume fraction profile
+
+        """
+        lmfit_values = params.valuesdict()
+        roughness = lmfit_values['roughness_1']
+
+        params['roughness_1'].val = 0
+        # print(lmfit_values['roughness_1'])
+
+        z, profile = self.sld_profile(params)
+        end = max(z)
+
+        points = np.linspace(lmfit_values['thickness_SiO2'], end, num=1001)
+        z, profile = self.sld_profile(params, points=points)
+
+        profile = (profile - lmfit_values['SLD_sub']) / (self.sld_poly - lmfit_values['SLD_sub'])
+        z = z - lmfit_values['thickness_SiO2']
+        params['roughness_1'].val = roughness
+
+        return z, profile
+
+    def moment(self, params, moment=1):
+        """
+        Calculates the n'th moment of the volume fraction profile
+
+        Parameters
+        ----------
+        params
+        moment
+
+        Returns
+        -------
+
+        """
+        points, profile = self.vol_fraction(params)
+        profile *= points**moment
+        val = simps(profile, points)
+        area = self.adsorbed_amount(params)
+        return val / area
+
+    def adsorbed_amount(self, params):
+        """
+
+        Parameters
+        ----------
+        params
+
+        Returns
+        -------
+
+        """
+        points, profile = self.vol_fraction(params)
+        area = simps(profile, points)
+        return area
+
+    def parameter_names(self, nparams=None):
+        int_par = ",".join(['thickness_%d,phi_%d,roughness_%d' %
+                            (i + 1, i + 1, i + 1) for i in range(self.n_interior)]).split(',')
+
+        return self.gen_par + self.tail_par + int_par
+
+
+class BrushPara(Brush):
+    tail_par = ['phi_init', 'tail_thickness', 'roughness_tail2int']
+
+    def __init__(self, *args, **kwds):
         """
         Parameters
         ----------
         """
         super(BrushPara, self).__init__(*args, **kwds)
-        self.n_interior = n_interior
-        self.n_slices = n_slices
-        self.sld_poly = sld_poly
 
     def to_slab(self, params):
         """
@@ -83,96 +168,8 @@ class BrushPara(AnalyticalReflectivityFunction):
 
         return slab_model
 
-    def parameter_names(self, nparams=None):
-        gen_par = ['scale', 'bkg',
-                   'SLD_super', 'SLD_sub', 'thickness_SiO2', 'SLD_SiO2',
-                   'roughness_SiO2', 'roughness_backing']
 
-        tail_par = ['phi_init','tail_thickness','roughness_tail2int']
-
-        int_par = ",".join(['thickness_%d,phi_%d,roughness_%d' %
-                           (i+1, i+1, i+1) for i in range(self.n_interior)]).split(',')
-
-        return gen_par + tail_par + int_par
-
-    # def params_test(self,params):
-    #
-    #     lmfit_values = params.valuesdict()
-    #     test = lmfit_values['roughness_SiO2']
-    #
-    #     test2 = 2
-    #     lmfit_values['roughness_SiO2'] = test2
-    #     return test, test2
-
-    def vol_fraction(self, params):
-        """
-        Calculates SLD profile and sets boundary between SiO2 and polymer to
-        z = 0. Then calculates volume fraction profile from additive mixing of
-        SLD Some guff here
-        Parameters
-        ----------
-        params: lmfit.Parameters instance
-            The parameters for this analytic profile
-        Returns
-        -------
-        z: z value for volume fraction profile
-        profile: phi values for volume fraction profile
-
-        """
-        lmfit_values = params.valuesdict()
-        roughness = lmfit_values['roughness_1']
-
-        params['roughness_1'].val = 0
-        # print(lmfit_values['roughness_1'])
-
-        z, profile = self.sld_profile(params)
-        end = max(z)
-
-        points = np.linspace(lmfit_values['thickness_SiO2'], end, num=1001)
-        z, profile = self.sld_profile(params, points=points)
-
-        profile = (profile - lmfit_values['SLD_sub']) / (self.sld_poly - lmfit_values['SLD_sub'])
-        z = z - lmfit_values['thickness_SiO2']
-        params['roughness_1'].val = roughness
-
-        return z, profile
-
-    def adsorbed_amount(self, params):
-        """
-
-        Parameters
-        ----------
-        params
-
-        Returns
-        -------
-
-        """
-        points, profile = self.vol_fraction(params)
-        area = simps(profile, points)
-        return area
-
-    def moment(self, params, moment=1):
-        """
-        Calculates the n'th moment of the volume fraction profile
-
-        Parameters
-        ----------
-        params
-        moment
-
-        Returns
-        -------
-
-        """
-        points, profile = self.vol_fraction(params)
-        profile *= points**moment
-        val = simps(profile, points)
-        area = self.adsorbed_amount(params)
-        return val / area
-
-
-if __name__ == "__main__":
+def test_brush_para():
     # load in some previously calculated data (from IGOR) for a test
     path = os.path.dirname(os.path.abspath(__file__))
     igor_r, igor_q = np.hsplit(np.loadtxt(os.path.join(path, 'brush_para.txt')), 2)
@@ -199,3 +196,12 @@ if __name__ == "__main__":
 
     first_moment = brush.moment(P)
     assert_allclose(2 * first_moment, 542.9683913)
+
+
+def test_brush_gauss():
+    pass
+
+
+if __name__ == "__main__":
+    test_brush_para()
+    test_brush_gauss()
