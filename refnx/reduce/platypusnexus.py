@@ -1,13 +1,5 @@
 from __future__ import division
-import numpy as np
-import h5py
-from . import peak_utils as ut
-import refnx.util.general as general
-import refnx.util.ErrorProp as EP
-from . import parabolic_motion as pm
-from . import event, rebin
-from scipy.optimize import leastsq, curve_fit
-from scipy.stats import t
+import io
 import os
 import os.path
 import argparse
@@ -16,7 +8,17 @@ import shutil
 from time import gmtime, strftime
 import string
 import warnings
-import io
+
+import numpy as np
+import h5py
+from . import peak_utils as ut
+import refnx.util.general as general
+from refnx.util.general import resolution_double_chopper, _dict_compare
+import refnx.util.ErrorProp as EP
+from . import parabolic_motion as pm
+from . import event, rebin
+from scipy.optimize import leastsq, curve_fit
+from scipy.stats import t
 import pandas as pd
 
 
@@ -30,6 +32,21 @@ O_C1, O_C2, O_C3, O_C4 = np.radians(disc_openings)
 DISCRADIUS = 350.
 EXTENT_MULT = 2
 PIXEL_OFFSET = 1
+
+spectrum_template = """<?xml version="1.0"?>
+<REFroot xmlns="">
+<REFentry time="$time">
+<Title>$title</Title>
+<REFdata axes="lambda" rank="1" type="POINT"\
+ spin="UNPOLARISED" dim="$n_spectra">
+<Run filename="$runnumber"/>
+<R uncertainty="dR">$r</R>
+<lambda uncertainty="dlambda" units="1/A">$l</lambda>
+<dR type="SD">$dr</dR>
+<dlambda type="_FWHM" units="1/A">$dl</dlambda>
+</REFdata>
+</REFentry>
+</REFroot>"""
 
 
 def catalogue(start, stop, path=None):
@@ -54,7 +71,7 @@ def catalogue(start, stop, path=None):
             'ss4vg', 'omega', 'twotheta', 'bm1_counts', 'time', 'daq_dirname',
             'start_time']
     run_number = []
-    d = {key:[] for key in info}
+    d = {key: [] for key in info}
 
     if path is None:
         path = '.'
@@ -83,89 +100,103 @@ def catalogue(start, stop, path=None):
 
 
 class Catalogue(object):
-    def __init__(self, h5data):
+    """
+    Extract relevant parts of a NeXus file for reflectometry reduction
+    """
+    def __init__(self, h5d):
+        """
+        Extract relevant parts of a NeXus file for reflectometry reduction
+        Access information via dict access, e.g. cat['detector'].
+
+        Parameters
+        ----------
+        h5d - HDF5 file handle
+        """
         d = {}
-        file_path = os.path.realpath(h5data.filename)
+        file_path = os.path.realpath(h5d.filename)
         d['path'] = os.path.dirname(file_path)
-        d['filename'] = h5data.filename
-        d['end_time'] = h5data['entry1/end_time'][0]
+        d['filename'] = h5d.filename
+        d['end_time'] = h5d['entry1/end_time'][0]
 
         try:
-            d['start_time'] = h5data['entry1/instrument/detector/start_time'][:]
+            d['start_time'] = (
+                h5d['entry1/instrument/detector/start_time'][:])
         except KeyError:
             # start times don't exist in this file
             d['start_time'] = None
 
-        d['sample_name'] = h5data['entry1/sample/name'][:]
-        d['ss1vg'] = h5data['entry1/instrument/slits/first/vertical/gap'][:]
-        d['ss2vg'] = h5data['entry1/instrument/slits/second/vertical/gap'][:]
-        d['ss3vg'] = h5data['entry1/instrument/slits/third/vertical/gap'][:]
-        d['ss4vg'] = h5data['entry1/instrument/slits/fourth/vertical/gap'][:]
-        d['ss1hg'] = h5data['entry1/instrument/slits/first/horizontal/gap'][:]
-        d['ss2hg'] = h5data['entry1/instrument/slits/second/horizontal/gap'][:]
-        d['ss3hg'] = h5data['entry1/instrument/slits/third/horizontal/gap'][:]
-        d['ss4hg'] = h5data['entry1/instrument/slits/fourth/horizontal/gap'][:]
+        d['sample_name'] = h5d['entry1/sample/name'][:]
+        d['ss1vg'] = h5d['entry1/instrument/slits/first/vertical/gap'][:]
+        d['ss2vg'] = h5d['entry1/instrument/slits/second/vertical/gap'][:]
+        d['ss3vg'] = h5d['entry1/instrument/slits/third/vertical/gap'][:]
+        d['ss4vg'] = h5d['entry1/instrument/slits/fourth/vertical/gap'][:]
+        d['ss1hg'] = h5d['entry1/instrument/slits/first/horizontal/gap'][:]
+        d['ss2hg'] = h5d['entry1/instrument/slits/second/horizontal/gap'][:]
+        d['ss3hg'] = h5d['entry1/instrument/slits/third/horizontal/gap'][:]
+        d['ss4hg'] = h5d['entry1/instrument/slits/fourth/horizontal/gap'][:]
 
-        d['omega'] = h5data['entry1/instrument/parameters/omega'][:]
-        d['twotheta'] = h5data['entry1/instrument/parameters/twotheta'][:]
+        d['omega'] = h5d['entry1/instrument/parameters/omega'][:]
+        d['twotheta'] = h5d['entry1/instrument/parameters/twotheta'][:]
 
-        d['detector'] = h5data['entry1/data/hmm'][:]
-        d['sth'] = h5data['entry1/sample/sth'][:]
-        d['bm1_counts'] = h5data['entry1/monitor/bm1_counts'][:]
-        d['total_counts'] = h5data['entry1/instrument/detector/total_counts'][:]
-        d['time'] = h5data['entry1/instrument/detector/time'][:]
-        d['mode'] = h5data['entry1/instrument/parameters/mode'][0].decode()
+        d['detector'] = h5d['entry1/data/hmm'][:]
+        d['sth'] = h5d['entry1/sample/sth'][:]
+        d['bm1_counts'] = h5d['entry1/monitor/bm1_counts'][:]
+        d['total_counts'] = h5d['entry1/instrument/detector/total_counts'][:]
+
+        d['time'] = h5d['entry1/instrument/detector/time'][:]
+        d['mode'] = h5d['entry1/instrument/parameters/mode'][0].decode()
 
         try:
-            event_directory_name = h5data[
+            event_directory_name = h5d[
                 'entry1/instrument/detector/daq_dirname'][0]
             d['daq_dirname'] = event_directory_name.decode()
         except KeyError:
             # daq_dirname doesn't exist in this file
             d['daq_dirname'] = None
 
-        d['t_bins'] = h5data['entry1/data/time_of_flight'][:].astype('float64')
-        d['x_bins'] = h5data['entry1/data/x_bin'][:]
-        d['y_bins'] = h5data['entry1/data/y_bin'][:]
+        d['t_bins'] = h5d['entry1/data/time_of_flight'][:].astype('float64')
+        d['x_bins'] = h5d['entry1/data/x_bin'][:]
+        d['y_bins'] = h5d['entry1/data/y_bin'][:]
 
-        master, slave, frequency, phase = self._chopper_values(h5data)
+        master, slave, frequency, phase = self._chopper_values(h5d)
         d['master'] = master
         d['slave'] = slave
         d['frequency'] = frequency
         d['phase'] = phase
-        d['chopper2_distance'] = h5data[
+        d['chopper2_distance'] = h5d[
             'entry1/instrument/parameters/chopper2_distance'][:]
-        d['chopper3_distance'] = h5data[
+        d['chopper3_distance'] = h5d[
             'entry1/instrument/parameters/chopper3_distance'][:]
-        d['chopper4_distance'] = h5data[
+        d['chopper4_distance'] = h5d[
             'entry1/instrument/parameters/chopper4_distance'][:]
-        d['chopper1_phase_offset'] = h5data[
+        d['chopper1_phase_offset'] = h5d[
             'entry1/instrument/parameters/chopper1_phase_offset'][:]
-        d['chopper2_phase_offset'] = h5data[
+        d['chopper2_phase_offset'] = h5d[
             'entry1/instrument/parameters/chopper2_phase_offset'][:]
-        d['chopper3_phase_offset'] = h5data[
+        d['chopper3_phase_offset'] = h5d[
             'entry1/instrument/parameters/chopper3_phase_offset'][:]
-        d['chopper4_phase_offset'] = h5data[
+        d['chopper4_phase_offset'] = h5d[
             'entry1/instrument/parameters/chopper4_phase_offset'][:]
-        d['guide1_distance'] = h5data[
+        d['guide1_distance'] = h5d[
             'entry1/instrument/parameters/guide1_distance'][:]
-        d['guide2_distance'] = h5data[
+        d['guide2_distance'] = h5d[
             'entry1/instrument/parameters/guide2_distance'][:]
-        d['sample_distance'] = h5data[
+        d['sample_distance'] = h5d[
             'entry1/instrument/parameters/sample_distance'][:]
-        d['slit2_distance'] = h5data[
+        d['slit2_distance'] = h5d[
             'entry1/instrument/parameters/slit2_distance'][:]
-        d['slit3_distance'] = h5data[
+        d['slit3_distance'] = h5d[
             'entry1/instrument/parameters/slit3_distance'][:]
         d['collimation_distance'] = d['slit3_distance'] - d['slit2_distance']
-        d['dy'] = h5data[
+        d['dy'] = h5d[
             'entry1/instrument/detector/longitudinal_translation'][:]
-        d['dz'] = h5data[
+        d['dz'] = h5d[
             'entry1/instrument/detector/vertical_translation'][:]
-        d['original_file_name'] = h5data['entry1/experiment/file_name']
+        d['original_file_name'] = h5d['entry1/experiment/file_name']
 
-        d['scan_axis_name'] = h5data['entry1/data/hmm'].attrs['axes'].decode('utf8').split(':')[0]
-        d['scan_axis'] = h5data['entry1/data/%s' % d['scan_axis_name']][:]
+        d['scan_axis_name'] = (
+            h5d['entry1/data/hmm'].attrs['axes'].decode('utf8').split(':')[0])
+        d['scan_axis'] = h5d['entry1/data/%s' % d['scan_axis_name']][:]
 
         # TODO put HDF file y pixel spacing in here.
         self.cat = d
@@ -224,17 +255,78 @@ class Catalogue(object):
         return master, slave, speeds[0] / 60., phases[slave - 1]
 
 
+def basename_datafile(pth):
+    """
+    Given a NeXUS path return the basename minus the file extension.
+    Parameters
+    ----------
+    pth : str
+
+    Returns
+    -------
+    basename : str
+
+    Examples
+    --------
+    >>> basename_datafile('a/b/c.nx.hdf')
+    'c'
+    """
+
+    basename = os.path.basename(pth)
+    return basename.split('.nx.hdf')[0]
+
+
 def number_datafile(run_number):
     """
-    From a run number figure out what the file name is.
+    Given a run number figure out what the file name is.
+    Given a file name, return the filename with the .nx.hdf extension
+
+    Parameters
+    ----------
+    run_number : int or str
+
+    Returns
+    -------
+    file_name : str
+
+    Examples
+    --------
+    >>> number_datafile(708)
+    'PLP0000708.nx.hdf
+    >>> number_datafile('PLP0000708.nx.hdf')
+    'PLP0000708.nx.hdf'
     """
-    return 'PLP{0:07d}.nx.hdf'.format(int(abs(run_number)))
+    try:
+        num = abs(int(run_number))
+        # you got given a run number
+        return 'PLP{0:07d}.nx.hdf'.format(num)
+    except ValueError:
+        # you may have been given full filename
+        if run_number.endswith('.nx.hdf'):
+            return run_number
+        else:
+            return run_number + '.nx.hdf'
 
 
 def datafile_number(fname):
     """
     From a filename figure out what the run number was
+
+    Parameters
+    ----------
+    fname : str
+        The filename to be processed
+
+    Returns
+    -------
+    run_number : int
+        The run number
+    Examples
+    --------
+    >>> datafile_number('PLP0000708.nx.hdf')
+    708
     """
+
     regex = re.compile(".*PLP([0-9]{7}).nx.hdf")
     _fname = os.path.basename(fname)
     r = regex.search(_fname)
@@ -261,13 +353,18 @@ class PlatypusNexus(object):
         """
         Initialises the PlatypusNexus object.
         """
-        if type(h5data) == h5py.File:
+        if type(h5data) is h5py.File:
             self.cat = Catalogue(h5data)
         else:
             with h5py.File(h5data, 'r') as h5data:
                 self.cat = Catalogue(h5data)
 
         self.processed_spectrum = dict()
+
+        # _arguments is a dict that contains all the parameters used to call
+        # `process`. If the arguments don't change then you shouldn't need to
+        # call process again, thereby saving time.
+        self._arguments = {}
 
     def __getattr__(self, item):
         if item in self.__dict__:
@@ -277,11 +374,31 @@ class PlatypusNexus(object):
         else:
             raise AttributeError
 
+    def __short_circuit_process(self, _arguments):
+        """
+        Returns the truth that two sets of arguments from successive calls to
+        the `process` method are the same.
+
+        Parameters
+        ----------
+        _arguments : dict
+            arguments passed to the `process` method
+
+        Returns
+        -------
+        val : bool
+            Truth that __arguments is the same as self.__arguments
+        """
+        _arguments.pop('self', None)
+
+        return _dict_compare(_arguments, self._arguments)
+
     def process(self, h5norm=None, lo_wavelength=2.5, hi_wavelength=19.,
                 background=True, direct=False, omega=None, twotheta=None,
                 rebin_percent=1., wavelength_bins=None, normalise=True,
                 integrate=-1, eventmode=None, event_folder=None, peak_pos=None,
-                background_mask=None, normalise_bins=True, **kwds):
+                background_mask=None, normalise_bins=True,
+                manual_beam_find=None, **kwds):
         r"""
         Processes the ProcessNexus object to produce a time of flight spectrum.
         The processed spectrum is stored in the `processed_spectrum` attribute.
@@ -339,12 +456,19 @@ class PlatypusNexus(object):
             last event detected (which may be quite different if the count rate
             is very low).
         event_folder : None or str
-            Specifies the path for the eventmode data. If `event_folder is None`
-            then the eventmode data is assumed to reside in the same directory
-            as the NeXUS file. If event_folder is a string, then the string
-            specifies the path to the eventmode data.
-        peak_pos : None or (float, float)
-            Specifies the peak position and peak standard deviation to use.
+            Specifies the path for the eventmode data. If
+            `event_folder is None` then the eventmode data is assumed to reside
+            in the same directory as the NeXUS file. If event_folder is a
+            string, then the string specifies the path to the eventmode data.
+        peak_pos : -1, None, or (float, float)
+            Options for finding specular peak position and peak standard
+            deviation.
+
+                -1             - use `manual_beam_find`.
+                None           - use the automatic beam finder, falling back to
+                                 `manual_beam_find` if it's provided.
+                (float, float) - specify the peak and peak standard deviation.
+
         background_mask : array_like
             An array of bool that specifies which y-pixels to use for
             background subtraction.  Should be the same length as the number of
@@ -354,6 +478,21 @@ class PlatypusNexus(object):
             Divides the intensity in each wavelength bin by the width of the
             bin. This allows one to compare spectra even if they were processed
             with different rebin percentages.
+        manual_beam_find : callable, optional
+            A function which allows the location of the specular ridge to be
+            determined. Has the signature `f(detector, detector_err)` where
+            `detector` and `detector_err` is the detector image and its
+            uncertainty. `detector` and `detector_err` have shape (n, t, y)
+            where `n` is the number of detector images, `t` is the number of
+            time of flight bins and `y` is the number of y pixels. The function
+            should return a tuple,
+            `(centre, centre_sd, lopx, hipx, background_pixels)`. `centre`,
+            `centre_sd`, `lopx`, `hipx` should be arrays of shape `(n, )`,
+            specifying the beam centre, beam width (standard deviation), lowest
+            pixel of foreground region, highest pixel of foreground region.
+            `background_pixels` is a list of length `n`. Each of the entries
+            should contain arrays of pixel numbers that specify the background
+            region for each of the detector images.
 
         Notes
         -----
@@ -387,6 +526,21 @@ class PlatypusNexus(object):
             Arrays containing the wavelength, specular intensity as a function
             of wavelength, standard deviation of specular intensity
         """
+
+        # it can be advantageous to save processing time if the arguments
+        # haven't changed
+        _arguments = locals().copy()
+        _arguments.pop('_arguments', None)
+        _arguments.pop('self', None)
+        # if you've already processed, then you may not need to process again
+        if (self.processed_spectrum and
+                self.__short_circuit_process(_arguments)):
+            return (self.processed_spectrum['m_lambda'],
+                    self.processed_spectrum['m_spec'],
+                    self.processed_spectrum['m_spec_sd'])
+        else:
+            self._arguments = _arguments
+
         cat = self.cat
 
         scanpoint = 0
@@ -482,8 +636,8 @@ class PlatypusNexus(object):
             # calculate the angular divergence
             domega[idx] = general.div(cat.ss2vg[scanpoint],
                                       cat.ss3vg[scanpoint],
-                                      (cat.slit3_distance[0]
-                                       - cat.slit2_distance[0]))[0]
+                                      (cat.slit3_distance[0] -
+                                       cat.slit2_distance[0]))[0]
 
             """
             work out the total flight length
@@ -513,9 +667,9 @@ class PlatypusNexus(object):
             """
             poff = cat.chopper1_phase_offset[0]
             poffset = 1.e6 * poff / (2. * 360. * freq)
-            toffset = (poffset
-                       + 1.e6 * master_opening / 2 / (2 * np.pi) / freq
-                       - 1.e6 * phase_angle[scanpoint] / (360 * 2 * freq))
+            toffset = (poffset +
+                       1.e6 * master_opening / 2 / (2 * np.pi) / freq -
+                       1.e6 * phase_angle[scanpoint] / (360 * 2 * freq))
             m_spec_tof_hist[idx] -= toffset
 
             detpositions[idx] = cat.dy[scanpoint]
@@ -536,7 +690,7 @@ class PlatypusNexus(object):
         # convert TOF to lambda
         # m_spec_tof_hist (n, t) and chod is (n,)
         m_lambda_hist = general.velocity_wavelength(
-                    1.e3 * flight_distance[:, np.newaxis] / m_spec_tof_hist)
+            1.e3 * flight_distance[:, np.newaxis] / m_spec_tof_hist)
 
         m_lambda = 0.5 * (m_lambda_hist[:, 1:] + m_lambda_hist[:, :-1])
         TOF -= toffset
@@ -552,15 +706,40 @@ class PlatypusNexus(object):
                                          lo_wavelength,
                                          hi_wavelength)
             detector, detector_sd, m_gravcorrcoefs = output
-            beam_centre, beam_sd = find_specular_ridge(detector, detector_sd)
-            # beam_centre = m_gravcorrcoefs
-        else:
-            beam_centre, beam_sd = find_specular_ridge(detector, detector_sd)
 
-        # you want to specify the specular ridge on the averaged detector image
-        if peak_pos is not None:
+        # where is the specular ridge?
+        if peak_pos == -1:
+            # you always want to find the beam manually
+            ret = manual_beam_find(detector, detector_sd)
+            beam_centre, beam_sd, lopx, hipx, bp = ret
+
+            full_backgnd_mask = np.zeros_like(detector, dtype=bool)
+            for i, v in enumerate(bp):
+                full_backgnd_mask[i, :, v] = True
+
+        elif peak_pos is None:
+            # use the auto finder, falling back to manual_beam_find
+            ret = find_specular_ridge(detector,
+                                      detector_sd,
+                                      manual_beam_find=manual_beam_find)
+            beam_centre, beam_sd, lopx, hipx, full_backgnd_mask = ret
+        else:
+            # the specular ridge has been specified
             beam_centre = np.ones(n_spectra) * peak_pos[0]
             beam_sd = np.ones(n_spectra) * peak_pos[1]
+            lopx, hipx, bp = fore_back_region(beam_centre,
+                                              beam_sd)
+
+            full_backgnd_mask = np.zeros_like(detector, dtype=bool)
+            for i, v in enumerate(bp):
+                full_backgnd_mask[i, :, v] = True
+
+        lopx = lopx.astype(int)
+        hipx = hipx.astype(int)
+
+        if np.size(beam_centre) != n_spectra:
+            raise RuntimeError('The number of beam centres should be equal'
+                               'to the number of detector images.')
 
         '''
         Rebinning in lambda for all detector
@@ -620,17 +799,13 @@ class PlatypusNexus(object):
                                               div)
 
         # convert the wavelength base to a timebase
-        m_spec_tof_hist = (0.001 * flight_distance[:, np.newaxis]
-                           / general.wavelength_velocity(m_lambda_hist))
+        m_spec_tof_hist = (0.001 * flight_distance[:, np.newaxis] /
+                           general.wavelength_velocity(m_lambda_hist))
 
         m_lambda = 0.5 * (m_lambda_hist[:, 1:] + m_lambda_hist[:, :-1])
 
-        m_spec_tof = (0.001 * flight_distance[:, np.newaxis]
-                      / general.wavelength_velocity(m_lambda))
-
-        # we want to integrate over the following pixel region
-        lopx = np.floor(beam_centre - beam_sd * EXTENT_MULT).astype('int')
-        hipx = np.ceil(beam_centre + beam_sd * EXTENT_MULT).astype('int')
+        m_spec_tof = (0.001 * flight_distance[:, np.newaxis] /
+                      general.wavelength_velocity(m_lambda))
 
         m_spec = np.zeros((n_spectra, np.size(detector, 1)))
         m_spec_sd = np.zeros_like(m_spec)
@@ -647,19 +822,6 @@ class PlatypusNexus(object):
                 full_backgnd_mask = np.repeat(backgnd_mask[np.newaxis, :],
                                               n_spectra,
                                               axis=0)
-            else:
-                # there may be different background regions for each spectrum
-                # in the file
-                y1 = np.round(lopx - PIXEL_OFFSET).astype('int')
-                y0 = np.round(y1 - (EXTENT_MULT * beam_sd)).astype('int')
-
-                y2 = np.round(hipx + PIXEL_OFFSET).astype('int')
-                y3 = np.round(y2 + (EXTENT_MULT * beam_sd)).astype('int')
-
-                full_backgnd_mask = np.zeros_like(detector, dtype='bool')
-                for i in range(n_spectra):
-                    full_backgnd_mask[i, :, y0[i]: y1[i]] = True
-                    full_backgnd_mask[i, :, y2[i] + 1: y3[i] + 1] = True
 
             # TODO: Correlated Uncertainties?
             detector, detector_sd = background_subtract(detector,
@@ -705,13 +867,14 @@ class PlatypusNexus(object):
         '''
         tau_da = m_spec_tof_hist[:, 1:] - m_spec_tof_hist[:, :-1]
 
-        m_lambda_fwhm = general.resolution_double_chopper(m_lambda,
-                                     z0=d_cx[:, np.newaxis] / 1000.,
-                                     freq=cat.frequency[:, np.newaxis],
-                                     L=flight_distance[:, np.newaxis] / 1000.,
-                                     H=cat.ss2vg[originalscanpoint] / 1000.,
-                                     xsi=phase_angle[:, np.newaxis],
-                                     tau_da=tau_da)
+        m_lambda_fwhm = (
+            resolution_double_chopper(m_lambda,
+                                      z0=d_cx[:, np.newaxis] / 1000.,
+                                      freq=cat.frequency[:, np.newaxis],
+                                      L=flight_distance[:, np.newaxis] / 1000.,
+                                      H=cat.ss2vg[originalscanpoint] / 1000.,
+                                      xsi=phase_angle[:, np.newaxis],
+                                      tau_da=tau_da))
 
         m_lambda_fwhm *= m_lambda
 
@@ -794,7 +957,8 @@ class PlatypusNexus(object):
 
     def chod(self, omega=0., twotheta=0., scanpoint=0):
         """
-        Calculates the flight length of the neutrons in the Platypus instrument.
+        Calculates the flight length of the neutrons in the Platypus
+        instrument.
 
         Parameters
         ----------
@@ -862,34 +1026,34 @@ class PlatypusNexus(object):
         elif mode == 'SB':
             # assumes guide1_distance is in the MIDDLE OF THE MIRROR
             chod += cat.guide1_distance[0]
-            chod += ((cat.sample_distance[0] - cat.guide1_distance[0])
-                     / np.cos(np.radians(omega)))
+            chod += ((cat.sample_distance[0] - cat.guide1_distance[0]) /
+                     np.cos(np.radians(omega)))
             if twotheta > omega:
                 chod += (cat.dy[scanpoint] /
                          np.cos(np.radians(twotheta - omega)))
             else:
-                chod += (cat.dy[scanpoint]
-                         / np.cos(np.radians(omega - twotheta)))
+                chod += (cat.dy[scanpoint] /
+                         np.cos(np.radians(omega - twotheta)))
 
         elif mode == 'DB':
             # guide2_distance in in the middle of the 2nd compound mirror
             # guide2_distance - longitudinal length from midpoint1 -> midpoint2
             #  + direct length from midpoint1->midpoint2
-            chod += (cat.guide2_distance[0]
-                     + 600. * np.cos(np.radians(1.2))
-                     * (1 - np.cos(np.radians(2.4))))
+            chod += (cat.guide2_distance[0] +
+                     600. * np.cos(np.radians(1.2)) *
+                     (1 - np.cos(np.radians(2.4))))
 
             # add on distance from midpoint2 to sample
-            chod += ((cat.sample_distance[0] - cat.guide2_distance[0])
-                     / np.cos(np.radians(4.8)))
+            chod += ((cat.sample_distance[0] - cat.guide2_distance[0]) /
+                     np.cos(np.radians(4.8)))
 
             # add on sample -> detector
             if twotheta > omega:
-                chod += (cat.dy[scanpoint]
-                         / np.cos(np.radians(twotheta - 4.8)))
+                chod += (cat.dy[scanpoint] /
+                         np.cos(np.radians(twotheta - 4.8)))
             else:
-                chod += (cat.dy[scanpoint]
-                         / np.cos(np.radians(4.8 - twotheta)))
+                chod += (cat.dy[scanpoint] /
+                         np.cos(np.radians(4.8 - twotheta)))
 
         return chod, d_cx
 
@@ -918,10 +1082,10 @@ class PlatypusNexus(object):
         scanpoint : int, optional
             Scanpoint you are interested in
         event_folder : None or str
-            Specifies the path for the eventmode data. If `event_folder is None`
-            then the eventmode data is assumed to reside in the same directory
-            as the NeXUS file. If event_folder is a string, then the string
-            specifies the path to the eventmode data.
+            Specifies the path for the eventmode data. If
+            `event_folder is None` then the eventmode data is assumed to reside
+            in the same directory as the NeXUS file. If event_folder is a
+            string, then the string specifies the path to the eventmode data.
 
         Returns
         -------
@@ -967,12 +1131,13 @@ class PlatypusNexus(object):
                                        'EOS.bin')
 
         with io.open(stream_filename, 'rb') as f:
+            last_frame = int(frame_bins[-1] * frequency)
             events, end_of_last_event = event.events(f,
-                                    max_frames=int(frame_bins[-1] * frequency))
+                                                     max_frames=last_frame)
 
         output = event.process_event_stream(events,
-                                            np.asfarray(frame_bins)
-                                            * frequency,
+                                            np.asfarray(frame_bins) *
+                                            frequency,
                                             t_bins,
                                             y_bins,
                                             x_bins)
@@ -998,6 +1163,12 @@ class PlatypusNexus(object):
             name
         scanpoint : int
             Which scanpoint to write
+
+        Returns
+        -------
+        processed : bool
+            If the file hasn't been processed then the `processed is False` and
+            vice versa
         """
         if self.processed_spectrum is None:
             return False
@@ -1025,19 +1196,6 @@ class PlatypusNexus(object):
         scanpoint : int
             Which scanpoint to write
         """
-        spectrum_template = """<?xml version="1.0"?>
-        <REFroot xmlns="">
-        <REFentry time="$time">
-        <Title>$title</Title>
-        <REFdata axes="lambda" rank="1" type="POINT" spin="UNPOLARISED" dim="$n_spectra">
-        <Run filename="$runnumber"/>
-        <R uncertainty="dR">$r</R>
-        <lambda uncertainty="dlambda" units="1/A">$l</lambda>
-        <dR type="SD">$dr</dR>
-        <dlambda type="_FWHM" units="1/A">$dl</dlambda>
-        </REFdata>
-        </REFentry>
-        </REFroot>"""
         if self.processed_spectrum is None:
             return
 
@@ -1056,7 +1214,7 @@ class PlatypusNexus(object):
 
         r = m_spec[:, sorted]
         l = m_lambda[:, sorted]
-        dl = m_lambda_fwhm [:, sorted]
+        dl = m_lambda_fwhm[:, sorted]
         dr = m_spec_sd[:, sorted]
         d['n_spectra'] = self.processed_spectrum['n_spectra']
         d['runnumber'] = 'PLP{:07d}'.format(self.cat.datafile_number)
@@ -1171,11 +1329,21 @@ def background_subtract_line(profile, profile_sd, background_mask):
     background_mask : array_like
         array of bool that specifies which Y pixels to use for background
         subtraction.
+
+    Returns
+    -------
+    profile_subt, profile_subt_err : np.ndarray, np.ndarray
+        Background subtracted profile and its uncertainty
     """
 
     # which values to use as a background region
     mask = np.array(background_mask).astype('bool')
     x_vals = np.where(mask)[0]
+
+    if np.size(x_vals) < 2:
+        # can't do a background subtraction if you have less than 2 points in
+        # the background
+        return profile, profile_sd
 
     try:
         y_vals = profile[x_vals]
@@ -1205,8 +1373,8 @@ def background_subtract_line(profile, profile_sd, background_mask):
                            p0=np.array([ahat, bhat]), absolute_sigma=True)
 
     def CI(xx, pcovmat):
-        return (pcovmat[0, 0] + pcovmat[1, 0] * xx
-                + pcovmat[0, 1] * xx + pcovmat[1, 1] * (xx ** 2))
+        return (pcovmat[0, 0] + pcovmat[1, 0] * xx +
+                pcovmat[0, 1] * xx + pcovmat[1, 1] * (xx ** 2))
 
     bkgd = f(np.arange(np.size(profile, 0)), popt[0], popt[1])
 
@@ -1229,10 +1397,9 @@ def background_subtract_line(profile, profile_sd, background_mask):
 
 
 def find_specular_ridge(detector, detector_sd, starting_offset=50,
-                        tolerance=0.01):
+                        tol=0.01, manual_beam_find=None):
     """
-    Find the specular ridges in a detector(n, t, y) plot. Assumes that the
-    specular ridge **does not** change position.
+    Find the specular ridges in a detector(n, t, y) plot.
 
     Parameters
     ----------
@@ -1240,21 +1407,50 @@ def find_specular_ridge(detector, detector_sd, starting_offset=50,
         detector array
     detector_sd : array_like
         standard deviations of detector array
+    tol : float
+        specifies threshold of fractional change for beam centre to be found
+    manual_beam_find : callable, optional
+        A function which allows the location of the specular ridge to be
+        determined, IFF the autodetection of specular ridge fails.
+        Has the signature `f(detector, detector_sd)`. `detector` and
+        `detector_sd` have shape (n, t, y) where `n` is the number of detector
+        images, `t` is the number of time of flight bins and `y` is the number
+        of y pixels. The function should return a tuple,
+        `(centre, centre_sd, lopx, hipx, background_pixels)`. `centre`,
+        `centre_sd`, `lopx`, `hipx` should be arrays of shape `(n, )`,
+        specifying the beam centre, beam width (standard deviation), lowest
+        pixel of foreground region, highest pixel of foreground region.
+        `background_pixels` is a list of length `n`. Each of the entries
+        should contain arrays of pixel numbers that specify the background
+        region for each of the detector images.
 
     Returns
     -------
-    centre, SD:
-        peak centres and standard deviations of peak width
+    centre, SD, lopx, hipx, background_mask : np.ndarrays
+        peak centre, standard deviation of peak width, lowest pixel to be
+        included from background region, highest pixel to be included from
+        background region, array specifying points to be used for background
+        subtraction
+        `np.size(centre) == n`.
     """
     beam_centre = np.zeros(np.size(detector, 0))
-    beam_sd = np.zeros(np.size(detector, 0))
+    beam_sd = np.zeros_like(beam_centre)
+
+    # lopx and hipx specify the foreground region to integrate over
+    lopx = np.zeros_like(beam_centre, dtype=int)
+    hipx = np.zeros_like(beam_centre, dtype=int)
+
+    # background mask specifies which pixels are background
+    background_mask = np.zeros_like(detector, dtype=bool)
+
     search_increment = 50
 
     starting_offset = abs(starting_offset)
 
-    n_increments = ((np.size(detector, 1) - starting_offset)
-                    // search_increment)
+    n_increments = ((np.size(detector, 1) - starting_offset) //
+                    search_increment)
 
+    # we want to integrate over the following pixel region
     for j in range(np.size(detector, 0)):
         last_centre = -1.
         last_sd = -1.
@@ -1273,14 +1469,14 @@ def find_specular_ridge(detector, detector_sd, starting_offset=50,
 
             # find the centroid and gauss peak in the last sections of the TOF
             # plot
-
             try:
-                centroid, gauss_peak = ut.peak_finder(y_cross, sigma=y_cross_sd)
+                centroid, gauss_peak = ut.peak_finder(y_cross,
+                                                      sigma=y_cross_sd)
             except RuntimeError:
                 continue
 
-            if (abs((gauss_peak[0] - last_centre) / last_centre) < tolerance
-                and abs((gauss_peak[1] - last_sd) / last_sd) < tolerance):
+            if (abs((gauss_peak[0] - last_centre) / last_centre) < tol and
+                    abs((gauss_peak[1] - last_sd) / last_sd) < tol):
                 last_centre = gauss_peak[0]
                 last_sd = gauss_peak[1]
                 converged = True
@@ -1292,11 +1488,70 @@ def find_specular_ridge(detector, detector_sd, starting_offset=50,
         if not converged:
             warnings.warn('specular ridge search did not work properly'
                           ' using last known centre', RuntimeWarning)
+            if manual_beam_find is not None:
+                ret = manual_beam_find(detector[j], detector_sd[j])
+                beam_centre[j], beam_sd[j], lopx[j], hipx[j], bp = ret
+                background_mask[j, :, bp[0]] = True
+
+                # don't assign to beam_centre, etc, at the end of this loop
+                continue
 
         beam_centre[j] = last_centre
         beam_sd[j] = np.abs(last_sd)
+        lp, hp, bp = fore_back_region(beam_centre[j], beam_sd[j])
+        lopx[j] = lp
+        hipx[j] = hp
+        background_mask[j, :, bp[0]] = True
 
-    return beam_centre, beam_sd
+    return beam_centre, beam_sd, lopx, hipx, background_mask
+
+
+def fore_back_region(beam_centre, beam_sd):
+    """
+    Calculates the fore and background regions based on the beam centre and
+    width
+
+    Parameters
+    ----------
+    beam_centre : float
+        beam_centre
+    beam_sd : float
+        beam width (standard deviation)
+
+    Returns
+    -------
+    lopx, hipx, background_pixels: float, float, list
+        Lowest pixel of foreground region
+        Highest pixel of foreground region
+        Pixels that are in the background region
+        Each of these should have `len(lopx) == len(beam_centre)`
+    """
+    _b_centre = np.array(beam_centre)
+    _b_sd = np.array(beam_sd)
+
+    lopx = np.floor(_b_centre - _b_sd * EXTENT_MULT).astype('int')
+    hipx = np.ceil(_b_centre + _b_sd * EXTENT_MULT).astype('int')
+
+    background_pixels = []
+
+    # limit of background regions
+    # from refnx.reduce.platypusnexus
+    y1 = np.atleast_1d(
+        np.round(lopx - PIXEL_OFFSET).astype('int'))
+    y0 = np.atleast_1d(
+        np.round(lopx - PIXEL_OFFSET - (EXTENT_MULT * _b_sd)).astype('int'))
+
+    y2 = np.atleast_1d(
+        np.round(hipx + PIXEL_OFFSET).astype('int'))
+    y3 = np.atleast_1d(
+        np.round(hipx + PIXEL_OFFSET + (EXTENT_MULT * _b_sd)).astype('int'))
+
+    # now generate background pixels
+    for i in range(np.size(y0)):
+        background_pixels.append(np.r_[np.arange(y0[i], y1[i] + 1),
+                                       np.arange(y2[i], y3[i] + 1)])
+
+    return lopx, hipx, background_pixels
 
 
 def correct_for_gravity(detector, detector_sd, lamda, coll_distance,
@@ -1330,14 +1585,14 @@ def correct_for_gravity(detector, detector_sd, lamda, coll_distance,
 
     Returns
     -------
-    corrected_data, corrected_data_sd, m_gravcorrcoefs : np.ndarray, np.ndarray, np.ndarray
+    corrected_data, corrected_data_sd, m_gravcorrcoefs :
+        np.ndarray, np.ndarray, np.ndarray
+
         Corrected image. This is a theoretical prediction where the spectral
         ridge is for each wavelength.  This will be used to calculate the
         actual angle of incidence in the reduction process.
 
     """
-    num_lambda = np.size(lamda, axis=1)
-
     x_init = np.arange((np.size(detector, axis=2) + 1) * 1.) - 0.5
 
     m_gravcorrcoefs = np.zeros((np.size(detector, 0)), dtype='float64')
@@ -1347,7 +1602,9 @@ def correct_for_gravity(detector, detector_sd, lamda, coll_distance,
 
     for spec in range(np.size(detector, 0)):
         neutron_speeds = general.wavelength_velocity(lamda[spec])
-        trajectories = pm.find_trajectory(coll_distance / 1000., theta, neutron_speeds)
+        trajectories = pm.find_trajectory(coll_distance / 1000.,
+                                          theta,
+                                          neutron_speeds)
         travel_distance = (coll_distance + sample_det[spec]) / 1000.
 
         # centres(t,)
@@ -1357,7 +1614,9 @@ def correct_for_gravity(detector, detector_sd, lamda, coll_distance,
         hipx = np.searchsorted(lamda[spec], hi_wavelength)
 
         def f(tru_centre):
-            deflections = pm.y_deflection(trajectories[lopx: hipx], neutron_speeds[lopx: hipx], travel_distance)
+            deflections = pm.y_deflection(trajectories[lopx: hipx],
+                                          neutron_speeds[lopx: hipx],
+                                          travel_distance)
 
             model = 1000. * deflections / Y_PIXEL_SPACING + tru_centre
             diff = model - centroids[lopx: hipx, 0]
@@ -1369,7 +1628,9 @@ def correct_for_gravity(detector, detector_sd, lamda, coll_distance,
         res = leastsq(f, x0)
         m_gravcorrcoefs[spec] = res[0][0]
 
-        total_deflection = 1000. * pm.y_deflection(trajectories, neutron_speeds, travel_distance)
+        total_deflection = 1000. * pm.y_deflection(trajectories,
+                                                   neutron_speeds,
+                                                   travel_distance)
         total_deflection /= Y_PIXEL_SPACING
 
         x_rebin = x_init.T + total_deflection[:, np.newaxis]
@@ -1460,11 +1721,14 @@ def accumulate_HDF_files(files):
                 h5data['entry1/instrument/detector/total_counts'][0]
             h5master['entry1/instrument/detector/time'][0] += \
                 h5data['entry1/instrument/detector/time'][0]
-
             h5master.flush()
+
+            h5data.close()
 
 
 def _check_HDF_file(h5data):
+    # If a file is an HDF5 file, then return the filename.
+    # otherwise return False
     if type(h5data) == h5py.File:
         return h5data.filename
     else:

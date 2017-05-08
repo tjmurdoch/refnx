@@ -12,15 +12,7 @@ import warnings
 from lmfit import Minimizer, Parameters
 import numpy as np
 import numpy.ma as ma
-from refnx.dataset import Data1D
-
-# check for EMCEE
-HAS_EMCEE = False
-try:
-    import emcee as emcee
-    HAS_EMCEE = True
-except ImportError:
-    pass
+from refnx.dataset import Data1D, ReflectDataset
 
 
 _MACHEPS = np.finfo(np.float64).eps
@@ -28,7 +20,8 @@ _MACHEPS = np.finfo(np.float64).eps
 
 def to_parameters(p0, varies=None, bounds=None, names=None, expr=None):
     """
-    Utility function to convert sequences into a :class:`lmfit.parameter.Parameters` instance
+    Utility function to convert sequences into a
+    :class:`lmfit.parameter.Parameters` instance
 
     Parameters
     ----------
@@ -39,7 +32,7 @@ def to_parameters(p0, varies=None, bounds=None, names=None, expr=None):
     bounds : sequence, optional
         Tuple of (min, max) pairs specifying the lower and upper bounds for
         each parameter
-    name : str sequence, optional
+    names : str sequence, optional
         Name of each parameter
     expr : str sequence, optional
         Constraints for each parameter
@@ -78,11 +71,9 @@ def to_parameters(p0, varies=None, bounds=None, names=None, expr=None):
         # the parameter. So fix the parameter and set the upper limit to be
         # slightly larger (otherwise you'll get an error when setting the
         # Parameter up)
-        if (lowlim[i] is not None
-            and hilim[i] is not None
-            and np.isfinite(lowlim[i])
-            and np.isfinite(hilim[i])
-            and lowlim[i] == hilim[i]):
+        if (lowlim[i] is not None and hilim[i] is not None and
+            np.isfinite(lowlim[i]) and np.isfinite(hilim[i]) and
+                (lowlim[i] == hilim[i])):
 
             hilim[i] += 1
             _p0[i] = lowlim[i]
@@ -101,7 +92,7 @@ def varys(params):
 
     Parameters
     ----------
-    parameters : lmfit.Parameters
+    params : lmfit.Parameters
 
     Returns
     -------
@@ -118,7 +109,7 @@ def exprs(params):
 
     Parameters
     ----------
-    parameters : lmfit.Parameters
+    params : lmfit.Parameters
 
     Returns
     -------
@@ -134,7 +125,7 @@ def values(params):
     A convenience function that takes an lmfit.Parameters instance and returns
     the values
     """
-    return np.array([param.value for param in params.values()], np.float64)
+    return np.array(params)
 
 
 def names(params):
@@ -202,7 +193,8 @@ class FitFunction(object):
     @staticmethod
     def parameter_names(nparams=0):
         """
-        Provides a set of names for constructing an :class:`lmfit.parameter.Parameters` instance
+        Provides a set of names for constructing an
+        :class:`lmfit.parameter.Parameters` instance
 
         Parameters
         ----------
@@ -223,72 +215,75 @@ class CurveFitter(Minimizer):
     r"""
     A curvefitting class that extends :class:`lmfit:Minimizer.Minimizer`
 
-Parameters
-----------
+    Parameters
+    ----------
 
-fitfunc : callable
-    Function calculating the generative model for the fit.  Should have
-    the signature: ``fitfunc(x, params, *fcn_args, **fcn_kws)``. You
-    can also supply a :class:`FitFunction` instance.
-data : sequence, :class:`refnx.dataset.Data1D` instance, str or file-like object
-    A sequence containing the data to be analysed.
-    If `data` is a sequence then:
+    fitfunc : callable
+        Function calculating the generative model for the fit.  Should have
+        the signature: ``fitfunc(x, params, *fcn_args, **fcn_kws)``. You
+        can also supply a :class:`FitFunction` instance.
+    data : sequence, :class:`refnx.dataset.Data1D` instance, str or
+           file-like object
+        A sequence containing the data to be analysed.
+        If `data` is a sequence then:
 
-        * data[0] - the independent variable (x-data)
+            * data[0] - the independent variable (x-data)
 
-        * data[1] - the dependent (observed) variable (y-data)
+            * data[1] - the dependent (observed) variable (y-data)
 
-        * data[2] - measured uncertainty in the dependent variable,
-            expressed as a standard deviation.
+            * data[2] - measured uncertainty in the dependent variable,
+                expressed as a standard deviation.
 
-    Only data[0] and data[1] are required, data[2] is optional. If data[2]
-    is not specified then the measured uncertainty is set to unity.
+        Only data[0] and data[1] are required, data[2] is optional. If data[2]
+        is not specified then the measured uncertainty is set to unity.
 
-    `data` can also be a :class:`refnx.dataset.Data1D` instance containing the data.
-    If `data` is a string, or file-like object then the string or file-like
-    object refers to a file containing the data. The data will be loaded
-    through the :class:`refnx.dataset.Data1D` constructor.
-params : :class:`lmfit.parameter.Parameters` instance
-    Specifies the parameter set for the fit
-mask : np.ndarray, optional
-    A boolean array with the same shape as `y`.  If `mask is True`
-    then that point is excluded from the residuals calculation.
-fcn_args : tuple, optional
-    Extra parameters required to fully specify fitfunc.
-fcn_kws : dict, optional
-    Extra keyword parameters needed to fully specify fitfunc.
-kws : dict, optional
-    Keywords passed to the minimizer.
-callback : callable, optional
-    A function called at each minimization step. Has the signature:
-    ``callback(params, iter, resid, *args, **kwds)``
-costfun : callable, optional
-    specifies your own cost function to minimize. Has the signature:
-    ``costfun(pars, generative, y, e, *fcn_args, **fcn_kws)`` where `pars`
-    is a `lmfit.Parameters` instance, `generative` is an array returned by
-    `fitfunc`, and `y` and `e` correspond to the `data[1]` and
-    `data[2]` arrays. `costfun` should return a single value. See Notes for
-    further details.
-lnpost : callable, optional
-    specifies your own log-posterior probablility function. This is only
-    relevant applies to the `emcee` method. Has the signature:
-    ``lnpost(pars, generative, y, e, *fcn_args, **fcn_kws)`` where `pars`
-    is a `lmfit.Parameters` instance, `generative` is an array returned by
-    `fitfunc`, and `y` and `e` correspond to the `data[1]` and
-    `data[2]` arrays. `lnpost` should return a single float value. See
-    :meth:`CurveFitter.emcee` for further details.
+        `data` can also be a :class:`refnx.dataset.Data1D` instance containing
+         the data. If `data` is a string, or file-like object then the string
+         or file-like object refers to a file containing the data. The data
+         will be loaded through the :class:`refnx.dataset.Data1D` constructor.
+    params : :class:`lmfit.parameter.Parameters` instance
+        Specifies the parameter set for the fit
+    mask : np.ndarray, optional
+        A boolean array with the same shape as `y`.  If `mask is True`
+        then that point is excluded from the residuals calculation.
+    fcn_args : tuple, optional
+        Extra parameters required to fully specify fitfunc.
+    fcn_kws : dict, optional
+        Extra keyword parameters needed to fully specify fitfunc.
+    kws : dict, optional
+        Keywords passed to the minimizer.
+    callback : callable, optional
+        A function called at each minimization step. Has the signature:
+        ``callback(params, iter, resid, *args, **kwds)``
+    costfun : callable, optional
+        specifies your own cost function to minimize. Has the signature:
+        ``costfun(pars, generative, y, e, *fcn_args, **fcn_kws)`` where `pars`
+        is a `lmfit.Parameters` instance, `generative` is an array returned by
+        `fitfunc`, and `y` and `e` correspond to the `data[1]` and
+        `data[2]` arrays. `costfun` should return a single value. See Notes for
+        further details.
+    lnpost : callable, optional
+        specifies your own log-posterior probablility function. This is only
+        relevant applies to the `emcee` method. Has the signature:
+        ``lnpost(pars, generative, y, e, *fcn_args, **fcn_kws)`` where `pars`
+        is a `lmfit.Parameters` instance, `generative` is an array returned by
+        `fitfunc`, and `y` and `e` correspond to the `data[1]` and
+        `data[2]` arrays. `lnpost` should return a single float value. See
+        :meth:`CurveFitter.emcee` for further details.
 
-Notes
------
-The default cost function for CurveFitter is:
+    Notes
+    -----
+    The default cost function for CurveFitter is:
 
-.. math::
-    \chi^2=\sum \left(\frac{\mathrm{data[1]} - \mathrm{fitfunc}}{\mathrm{data[2]}}\right)^2
+    .. math::
+        \chi^2=\sum \left(\frac{\mathrm{data[1]} -
+                    \mathrm{fitfunc}}{\mathrm{data[2]}}\right)^2
 
-This user defined cost function can be used to specify other cost
-functions for `differential_evolution`, `leastsq`, `least_squares`.
+    This user defined cost function can be used to specify other cost
+    functions for `differential_evolution`, `leastsq`, `least_squares`.
 
-.. _lmfit.Minimizer: http://lmfit.github.io/lmfit-py/fitting.html#module-Minimizer
+    .. _lmfit.Minimizer:
+        http://lmfit.github.io/lmfit-py/fitting.html#module-Minimizer
     """
 
     def __init__(self, fitfunc, data, params, mask=None,
@@ -297,36 +292,27 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
         self.fitfunc = fitfunc
         self.costfun = costfun
         self.lnpost = lnpost
-        self._cf_userargs = fcn_args
-        self._cf_userkws = fcn_kws
 
+        userkws = {}
+        if fcn_kws is not None:
+            userkws = fcn_kws
+
+        # bind the data to this object
         if isinstance(data, Data1D):
-            self.xdata, self.ydata, self.edata, temp = data.data
-        elif type(data) == 'str' or hasattr(data, 'seek'):
-            tdata = Data1D(data)
-            self.xdata, self.ydata, self.edata, temp = tdata.data
-        elif len(data) == 2:
-            self.xdata, self.ydata = data
-            self.edata = np.zeros((0))
-        elif len(data) == 3:
-            self.xdata, self.ydata, self.edata = data
+            self.dataset = data
         else:
-            raise ValueError("Couldn't decipher what kind of data"
-                             " you were providing.")
-
-        # have uncertainties have been supplied for each of the data points?
-        self.scale_covar = False
-        if not self.edata.size:
-            self.edata = np.ones_like(self.ydata)
-            self.scale_covar = True
+            self.dataset = ReflectDataset(data)
 
         if mask is not None:
-            if self.ydata.shape != mask.shape:
+            if self.dataset.y.shape != mask.shape:
                 raise ValueError('mask shape should be same as data')
 
             self.mask = mask
         else:
             self.mask = None
+
+        # have uncertainties have been supplied for each of the data points?
+        self.scale_covar = not self.is_weighted
 
         min_kwds = {}
         if kws is not None:
@@ -339,6 +325,8 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
                                           params,
                                           iter_cb=callback,
                                           scale_covar=self.scale_covar,
+                                          fcn_args=fcn_args,
+                                          fcn_kws=userkws,
                                           **min_kwds)
 
     def _update_resid(self):
@@ -348,15 +336,14 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
         method exists because people could update the data after
         creation of the CurveFitter object.
         """
-        self._resid = partial(_parallel_residuals_calculator,
-                              fitfunc=self.fitfunc,
-                              data_tuple=(self.xdata,
-                                          self.ydata,
-                                          self.edata),
-                              mask=self.mask,
-                              fcn_args=self._cf_userargs,
-                              fcn_kws=self._cf_userkws,
-                              costfun=self.costfun)
+        self._resid = (
+            _parallel_residuals_calculator(self.fitfunc,
+                                           data_tuple=(self.dataset.x,
+                                                       self.dataset.y,
+                                                       self.dataset.y_err),
+                                           mask=self.mask,
+                                           costfun=self.costfun))
+
         self.userfcn = self._resid
 
     @property
@@ -368,21 +355,15 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
         -------
         (x, y, e, mask) : data tuple
         """
-        return (self.xdata,
-                self.ydata,
-                self.edata,
+        return (self.dataset.x,
+                self.dataset.y,
+                self.dataset.y_err,
                 self.mask)
 
     @data.setter
     def data(self, data):
-        self.xdata = np.asfarray(data[0])
-        self.ydata = np.asfarray(data[1])
-        if len(data) > 2:
-            self.edata = np.asfarray(data[2])
-            self.scale_covar = False
-        else:
-            self.edata = np.ones_like(self.ydata)
-            self.scale_covar = True
+        self.dataset = ReflectDataset(data)
+        self.scale_covar = self.dataset.weighted
 
     def residuals(self, params=None):
         """
@@ -411,7 +392,7 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
 
         params.update_constraints()
         self._update_resid()
-        return self._resid(params)
+        return self._resid(params, *self.userargs, **self.userkws)
 
     def model(self, params=None):
         """
@@ -432,8 +413,9 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
             params = self.params
 
         params.update_constraints()
-        self._update_resid()
-        return self._resid(params, model=True)
+
+        return self.fitfunc(self.dataset.x, params,
+                            *self.userargs, **self.userkws)
 
     def fit(self, method='leastsq', params=None, **kws):
         """
@@ -455,7 +437,8 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
             - 'tnc'                    -    Truncate Newton
             - 'trust-ncg'              -    Trust Newton-CGn
             - 'dogleg'                 -    Dogleg
-            - 'slsqp'                  -    Sequential Linear Squares Programming
+            - 'slsqp'                  -    Sequential Linear Squares
+                                            Programming
             - 'differential_evolution' -    differential evolution
 
         params : Parameters, optional
@@ -536,8 +519,8 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
             to calculate, or if there are a large number of objective
             evaluations per step (`ntemps * nwalkers * nvarys`).
         seed : int or `np.random.RandomState`, optional
-            If `seed` is an int, a new `np.random.RandomState` instance is used,
-            seeded with `seed`.
+            If `seed` is an int, a new `np.random.RandomState` instance is
+            used, seeded with `seed`.
             If `seed` is already a `np.random.RandomState` instance, then that
             `np.random.RandomState` instance is used.
             Specify `seed` for repeatable minimizations.
@@ -583,7 +566,9 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
 
         .. math::
 
-            \ln p(D|F_{true}) = -\frac{1}{2}\sum_n \left[\frac{\left(g_n(F_{true}) - D_n \right)^2}{s_n^2}+\ln (2\pi s_n^2)\right]
+            \ln p(D|F_{true}) = -\frac{1}{2}\sum_n
+                \left[\frac{\left(g_n(F_{true}) -
+                   D_n \right)^2}{s_n^2}+\ln (2\pi s_n^2)\right]
 
         The first summand in the square brackets represents the residual for a
         given datapoint (:math:`g` being the generative model) . This term
@@ -608,30 +593,29 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
             if self.is_weighted or self.lnpost is not None:
                 # get the proper log-likelihood if you have
                 # uncertainties
-                self._resid = partial(_parallel_likelihood_calculator,
-                                      fitfunc=self.fitfunc,
-                                      data_tuple=(self.xdata,
-                                                  self.ydata,
-                                                  self.edata),
-                                      mask=self.mask,
-                                      fcn_args=self._cf_userargs,
-                                      fcn_kws=self._cf_userkws,
-                                      lnpost=self.lnpost
-                                      )
+                data_tuple = (self.dataset.x,
+                              self.dataset.y,
+                              self.dataset.y_err)
+                self._resid = (
+                    _parallel_likelihood_calculator(self.fitfunc,
+                                                    data_tuple=data_tuple,
+                                                    mask=self.mask,
+                                                    lnpost=self.lnpost))
                 self.userfcn = self._resid
             else:
                 pass
 
-            result = super(CurveFitter, self).emcee(params=params, steps=steps,
-                                                    nwalkers=nwalkers,
-                                                    burn=burn,
-                                                    thin=thin, ntemps=ntemps,
-                                                    pos=pos,
-                                                    reuse_sampler=reuse_sampler,
-                                                    workers=workers,
-                                                    float_behavior='posterior',
-                                                    is_weighted=self.is_weighted,
-                                                    seed=seed)
+            result = (
+                super(CurveFitter, self).emcee(params=params, steps=steps,
+                                               nwalkers=nwalkers,
+                                               burn=burn,
+                                               thin=thin, ntemps=ntemps,
+                                               pos=pos,
+                                               reuse_sampler=reuse_sampler,
+                                               workers=workers,
+                                               float_behavior='posterior',
+                                               is_weighted=self.is_weighted,
+                                               seed=seed))
         finally:
             self._update_resid()
 
@@ -643,10 +627,10 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
         """
         Returns the truth that the fit is weighted by measurement uncertainties
         """
-        return not self.scale_covar
+        return self.dataset.weighted
 
-    def _resampleMC(self, samples, method='differential_evolution',
-                    params=None):
+    def _resample_mc(self, samples, method='differential_evolution',
+                     params=None):
         """
         Monte Carlo Resampling. Refits synthesised data `samples` times. Each
         synthesised dataset is created from the original dataset by adding
@@ -661,6 +645,10 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
             Number of synthesis/refit cycles.
         method : str
             Minimisation method. See the `fit` method for other options.
+        params : lmfit.Parameters, optional
+            Parameters to use as starting point. If this is not specified
+            then the Parameters used to initialise the CurveFitter object are
+            used.
 
         Returns
         -------
@@ -692,7 +680,7 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
             for idx in range(samples):
                 # synthesize a dataset
                 ne = y + e * np.random.randn(y.size)
-                self.ydata = ne
+                self.dataset.y = ne
 
                 # update the _resid attribute
                 self._update_resid()
@@ -704,7 +692,7 @@ functions for `differential_evolution`, `leastsq`, `least_squares`.
                 for idx2, var_name in enumerate(output.var_names):
                     mc[idx, idx2] = res.params[var_name].value
         finally:
-            self.ydata = y
+            self.dataset.y = y
 
         quantiles = np.percentile(mc, [15.87, 50, 84.13], axis=0)
 
@@ -735,7 +723,8 @@ class GlobalFitter(CurveFitter):
     """
     Simultaneous curvefitting of multiple datasets
 
-    fitters : sequence of :class:`refnx.analysis.curvefitter.CurveFitter` instances
+    fitters : sequence of :class:`refnx.analysis.curvefitter.CurveFitter`
+        instances
         Contains all the fitters and fitfunctions for the global fit.
     constraints : str sequence, optional
         Of the type 'dN:param_name = constraint'. Sets a constraint
@@ -854,23 +843,25 @@ class GlobalFitter(CurveFitter):
                 p[par_to_be_constrained].expr = const
 
         self.params = p
-        xdata = [fitter.xdata for fitter in fitters]
-        ydata = [fitter.ydata for fitter in fitters]
-        edata = [fitter.edata for fitter in fitters]
+        xdata = [fitter.dataset.x for fitter in fitters]
+        ydata = [fitter.dataset.y for fitter in fitters]
+        edata = [fitter.dataset.y_err for fitter in fitters]
 
         original_params = [fitter.params for fitter in fitters]
         original_userargs = [fitter.userargs for fitter in fitters]
         original_kws = [fitter.userkws for fitter in fitters]
 
         self._fitfunc = partial(_parallel_global_fitfunc,
-                fitfuncs=[fitter.fitfunc for fitter in fitters],
-                new_param_reference=self.new_param_reference,
-                original_params=original_params,
-                original_userargs=original_userargs,
-                original_kws=original_kws)
+                                fitfuncs=[fitter.fitfunc for
+                                          fitter in fitters],
+                                new_param_reference=self.new_param_reference,
+                                original_params=original_params,
+                                original_userargs=original_userargs,
+                                original_kws=original_kws)
 
         super(GlobalFitter, self).__init__(self._fitfunc,
-                                           (xdata, np.hstack(ydata), np.hstack(edata)),
+                                           (xdata, np.hstack(ydata),
+                                            np.hstack(edata)),
                                            self.params,
                                            callback=callback,
                                            kws=min_kwds)
@@ -894,7 +885,7 @@ class GlobalFitter(CurveFitter):
             params = self.params
 
         params.update_constraints()
-        return self._fitfunc(self.xdata, params=params)
+        return self._fitfunc(self.dataset.x, params=params)
 
     def residuals(self, params=None):
         """
@@ -925,71 +916,69 @@ class GlobalFitter(CurveFitter):
         back into each of the original `CurveFitter.params` attributes.
         """
         for name, param in params.items():
-            fitter_i, original_name = self.new_param_reference[name]
-            self.original_params[fitter_i][original_name].value = param._getval()
+            fitter_i, orig_name = self.new_param_reference[name]
+            self.original_params[fitter_i][orig_name].value = param._getval()
 
 
-def _parallel_residuals_calculator(params, fitfunc=None, data_tuple=None,
-                                   mask=None, fcn_args=(), fcn_kws=None,
-                                   model=False, costfun=None):
+class _parallel_residuals_calculator(object):
     """
     Objective function calculating the residuals for a curvefit. This is a
-    separate function and not a method in CurveFitter to allow for
+    separate object and not a method in CurveFitter to allow for
     multiprocessing.
     """
-    kws = {}
-    if fcn_kws is not None:
-        kws = fcn_kws
+    def __init__(self, fitfunc, data_tuple=None, mask=None, costfun=None):
+        self.x, self.y, self.e = data_tuple
+        self.fitfunc = fitfunc
+        self.mask = mask
+        self.costfun = costfun
 
-    x, y, e = data_tuple
+    def __call__(self, params, *userargs, **userkws):
+        resid = self.fitfunc(self.x, params, *userargs, **userkws)
 
-    resid = fitfunc(x, params, *fcn_args, **kws)
-    if model:
-        return resid
+        if self.costfun is not None:
+            return self.costfun(params, resid, self.y, self.e, *userargs,
+                                **userkws)
 
-    if costfun is not None:
-        return costfun(params, resid, y, e, *fcn_args, **kws)
+        resid -= self.y
+        resid /= self.e
 
-    resid -= y
-    resid /= e
-
-    if mask is not None:
-        resid_ma = ma.array(resid, mask=mask)
-        return resid_ma[~resid_ma.mask].data
-    else:
-        return resid
+        if self.mask is not None:
+            resid_ma = ma.array(resid, mask=self.mask)
+            return resid_ma[~resid_ma.mask].data
+        else:
+            return resid
 
 
-def _parallel_likelihood_calculator(params, fitfunc=None, data_tuple=None,
-                                    mask=None, fcn_args=(), fcn_kws=None,
-                                    lnpost=None):
+class _parallel_likelihood_calculator(object):
     """
     Function calculating the log-likelihood for a curvefit. This is a
     separate function and not a method in CurveFitter to allow for
     multiprocessing.
     """
-    kws = {}
-    if fcn_kws is not None:
-        kws = fcn_kws
+    def __init__(self, fitfunc, data_tuple=None, mask=None, lnpost=None):
+        self.x, self.y, self.e = data_tuple
+        self.fitfunc = fitfunc
+        self.mask = mask
+        self.lnpost = lnpost
 
-    x, y, e = data_tuple
+    def __call__(self, params, *userargs, **userkws):
+        resid = self.fitfunc(self.x, params, *userargs, **userkws)
 
-    resid = fitfunc(x, params, *fcn_args, **kws)
-
-    if lnpost is not None:
-        return lnpost(params, resid, y, e, *fcn_args, **kws)
-    else:
-        resid -= y
-        resid /= e
-        resid *= resid
-
-        resid += np.log(2 * np.pi * e**2)
-
-        if mask is not None:
-            resid_ma = ma.array(resid, mask=mask)
-            return -0.5 * np.sum(resid_ma[~resid_ma.mask].data)
+        if self.lnpost is not None:
+            return self.lnpost(params, resid, self.y, self.e, *userargs,
+                               **userkws)
         else:
-            return -0.5 * np.sum(resid)
+            resid -= self.y
+            resid /= self.e
+            resid *= resid
+
+            resid += np.log(2 * np.pi * self.e ** 2)
+
+            if self.mask is not None:
+                resid_ma = ma.array(resid, mask=self.mask)
+                return -0.5 * np.sum(resid_ma[~resid_ma.mask].data)
+            else:
+                return -0.5 * np.sum(resid)
 
 
 def _parallel_global_fitfunc(x, params, fitfuncs=None,
@@ -1022,15 +1011,15 @@ if __name__ == '__main__':
 
     def gauss(x, params, *args):
         """Calculates a Gaussian model"""
-        p = params.valuesdict().values()
+        p = values(params)
         return p[0] + p[1] * np.exp(-((x - p[2]) / p[3])**2)
 
     xdata = np.linspace(-4, 4, 100)
     p0 = np.array([0., 1., 0., 1.])
-    bounds = [(-1., 1.), (0., 2.), (-3., 3.), (0.001, 2.)]
+    lbounds = [(-1., 1.), (0., 2.), (-3., 3.), (0.001, 2.)]
 
-    temp_pars = to_parameters(p0, bounds=bounds)
-    pars = to_parameters(p0 + 0.2, bounds=bounds)
+    temp_pars = to_parameters(p0, bounds=lbounds)
+    pars = to_parameters(p0 + 0.2, bounds=lbounds)
 
     ydata = gauss(xdata, temp_pars) + 0.1 * np.random.random(xdata.size)
 

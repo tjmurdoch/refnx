@@ -1,7 +1,6 @@
-__author__ = 'anz'
 import unittest
 import numpy as np
-from numpy.testing import (assert_almost_equal, assert_, assert_equal)
+from numpy.testing import (assert_almost_equal, assert_equal)
 import refnx.reduce.peak_utils as peak_utils
 
 
@@ -45,6 +44,7 @@ class TestPeakUtils(unittest.TestCase):
         y = np.ones(2)
         median, sd = peak_utils.median(y, dx=9.)
         assert_equal(median, 4.5)
+
 
 if __name__ == '__main__':
     unittest.main()

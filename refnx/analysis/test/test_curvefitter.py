@@ -1,15 +1,15 @@
 import os.path
 import unittest
-import time
 from copy import deepcopy
 
 import refnx.analysis.curvefitter as curvefitter
-from refnx.analysis.curvefitter import (values, CurveFitter, HAS_EMCEE,
+from refnx.analysis.curvefitter import (values, CurveFitter,
                                         FitFunction,
                                         _parallel_likelihood_calculator)
 import numpy as np
 from lmfit.minimizer import MinimizerResult
-from NISTModels import NIST_runner, Models, ReadNistData
+from lmfit import Parameters
+from NISTModels import NIST_runner, Models
 
 from numpy.testing import (assert_almost_equal, assert_equal, assert_,
                            assert_allclose)
@@ -20,8 +20,7 @@ path = os.path.dirname(os.path.abspath(__file__))
 
 
 def gauss(x, p0, *args):
-    p = list(p0.valuesdict().values())
-
+    p = values(p0)
     return p[0] + p[1] * np.exp(-((x - p[2]) / p[3])**2)
 
 
@@ -32,24 +31,23 @@ class TestFitter(unittest.TestCase):
         self.p0 = np.array([0., 1., 0.0, 1.])
         self.bounds = [(-1, 1), (0, 2), (-1, 1.), (0.001, 2)]
 
-        self.params = curvefitter.to_parameters(self.p0 + 0.2, bounds=self.bounds)
-        self.final_params = curvefitter.to_parameters(self.p0, bounds=self.bounds)
+        self.params = curvefitter.to_parameters(self.p0 + 0.2,
+                                                bounds=self.bounds)
+        self.final_params = curvefitter.to_parameters(self.p0,
+                                                      bounds=self.bounds)
 
         self.ydata = gauss(self.xdata, self.final_params)
         self.f = CurveFitter(gauss, (self.xdata, self.ydata), self.params)
 
-    def pvals(self, params):
-        return np.asfarray(list(params.valuesdict().values()))
-
     def test_fitting(self):
         # the simplest test - a really simple gauss curve with perfect data
         res = self.f.fit()
-        assert_almost_equal(self.pvals(res.params), self.p0)
+        assert_almost_equal(values(res.params), self.p0)
         assert_almost_equal(res.chisqr, 0)
 
     def test_NIST(self):
         # Run all the NIST standard tests with leastsq
-        for model in Models.keys():
+        for model in Models:
             try:
                 NIST_runner(model)
             except Exception:
@@ -72,17 +70,17 @@ class TestFitter(unittest.TestCase):
     def test_leastsq(self):
         # test that a custom method can be used with scipy.optimize.minimize
         res = self.f.fit()
-        assert_almost_equal(self.pvals(res.params), self.p0)
+        assert_almost_equal(values(res.params), self.p0)
 
     def test_resid_length(self):
         # the residuals length should be equal to the data length
         resid = self.f.residuals(self.params)
-        assert_equal(resid.size, self.f.ydata.size)
+        assert_equal(resid.size, self.f.dataset.y.size)
 
     def test_scalar_minimize(self):
-        assert_equal(self.pvals(self.params), self.p0 + 0.2)
+        assert_equal(values(self.params), self.p0 + 0.2)
         res = self.f.fit(method='differential_evolution')
-        assert_almost_equal(self.pvals(res.params), self.p0, 3)
+        assert_almost_equal(values(res.params), self.p0, 3)
 
     def test_holding_parameter(self):
         # holding parameters means that those parameters shouldn't change
@@ -90,6 +88,7 @@ class TestFitter(unittest.TestCase):
         self.params['p0'].vary = False
         res = self.f.fit()
         assert_almost_equal(self.p0[0] + 0.2, self.params['p0'].value)
+        assert_almost_equal(res.params['p0'].value, self.params['p0'].value)
 
     def test_fit_returns_MinimizerResult(self):
         self.params['p0'].vary = False
@@ -103,9 +102,41 @@ class TestFitter(unittest.TestCase):
         def costfun(params, generative, y, e):
             return np.sum((y - generative / e) ** 2)
 
-        g = CurveFitter(gauss, (self.xdata, self.ydata), self.params, costfun=costfun)
+        g = CurveFitter(gauss,
+                        (self.xdata, self.ydata),
+                        self.params,
+                        costfun=costfun)
+
         res2 = g.fit('nelder')
-        assert_almost_equal(self.pvals(res.params), self.pvals(res2.params))
+        assert_almost_equal(values(res.params), values(res2.params))
+
+    def test_args_kwds_are_used(self):
+        # check that user defined args and kwds make their way into the user
+        # function
+        a = [1., 2.]
+        x = np.linspace(0, 10, 11)
+        y = a[0] + 1 + 2 * a[1] * x
+
+        par = Parameters()
+        par.add('p0', 1.5)
+        par.add('p1', 2.5)
+
+        def fun(x, p, *args, **kwds):
+            assert_equal(args, a)
+            return args[0] + p['p0'] + p['p1'] * a[1] * x
+
+        g = CurveFitter(fun, (x, y), par, fcn_args=a)
+        res = g.fit()
+        assert_almost_equal(values(res.params), [1., 2.])
+
+        d = {'a': 1, 'b': 2}
+
+        def fun(x, p, *args, **kwds):
+            return kwds['a'] + p['p0'] + p['p1'] * kwds['b'] * x
+
+        g = CurveFitter(fun, (x, y), par, fcn_kws=d)
+        res = g.fit()
+        assert_almost_equal(values(res.params), [1., 2.])
 
     # def test_emcee_NIST(self):
     #     datasets = ['DanWood']
@@ -164,10 +195,12 @@ class TestFitterGauss(unittest.TestCase):
         self.params = curvefitter.to_parameters(self.p0, bounds=self.bounds)
 
     def test_best_weighted(self):
-        f = CurveFitter(gauss, (self.xvals, self.yvals, self.evals), self.params)
+        f = CurveFitter(gauss,
+                        (self.xvals, self.yvals, self.evals),
+                        self.params)
         res = f.fit()
 
-        output = list(res.params.valuesdict().values())
+        output = values(res.params)
         assert_almost_equal(output, self.best_weighted, 4)
         assert_almost_equal(res.chisqr, self.best_weighted_chisqr)
 
@@ -180,7 +213,7 @@ class TestFitterGauss(unittest.TestCase):
                         self.params)
         res = f.fit()
 
-        output = list(res.params.valuesdict().values())
+        output = values(res.params)
         assert_almost_equal(output, self.best_unweighted, 5)
         assert_almost_equal(res.chisqr, self.best_unweighted_chisqr)
 
@@ -191,8 +224,8 @@ class TestFitterGauss(unittest.TestCase):
         # residuals needs to be pickleable if one wants to use Pool
         f = CurveFitter(gauss, (self.xvals, self.yvals), self.params)
         import pickle
-        pkl = pickle.dumps(f)
-        pkl = pickle.dumps(f._resid)
+        pickle.dumps(f)
+        pickle.dumps(f._resid)
 
     def test_parameter_names(self):
         # each instance of CurveFitter should be able to give a default set of
@@ -215,7 +248,7 @@ class TestFitterGauss(unittest.TestCase):
         assert_allclose(errs, self.best_weighted_errors, rtol=0.2)
 
         # now try with resampling MC
-        out = f._resampleMC(500, params=self.params, method='leastsq')
+        out = f._resample_mc(500, params=self.params, method='leastsq')
         within_sigma(self.best_weighted, out.params)
         # test if the sigmas are similar as well (within 20 %)
         errs = np.array([out.params[par].stderr for par in out.params])
@@ -240,9 +273,9 @@ class TestFitterGauss(unittest.TestCase):
 
     def test_lnpost(self):
         data = (self.xvals, self.yvals, self.evals)
-        lnprob = _parallel_likelihood_calculator(self.params,
-                                                 gauss,
-                                                 data)
+        f = _parallel_likelihood_calculator(gauss,
+                                            data_tuple=data)
+        lnprob = f(self.params)
 
         def lnpost(pars, generative, y, e):
             resid = y - generative
@@ -251,10 +284,10 @@ class TestFitterGauss(unittest.TestCase):
             resid += np.log(2 * np.pi * e**2)
             return -0.5 * np.sum(resid)
 
-        lnprob2 = _parallel_likelihood_calculator(self.params,
-                                                  gauss,
-                                                  data,
-                                                  lnpost=lnpost)
+        g = _parallel_likelihood_calculator(gauss,
+                                            data_tuple=data,
+                                            lnpost=lnpost)
+        lnprob2 = g(self.params)
 
         assert_equal(lnprob2, lnprob)
 

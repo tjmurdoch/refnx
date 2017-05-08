@@ -1,17 +1,17 @@
 from __future__ import division
-
-__author__ = 'anz'
-from refnx.analysis import reflectivity
 import numpy as np
-from scipy.signal import convolve, fftconvolve
+from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
+from refnx.analysis import reflectivity
+
 
 def res(qq, layer, resolution=5):
     resolution /= 100
     gaussnum = 51
     gaussgpoint = (gaussnum - 1) / 2
 
-    gauss = lambda x, s: 1. / s / np.sqrt(2 * np.pi) * np.exp(-0.5 * x**2 / s / s)
+    def gauss(x, s):
+        return 1. / s / np.sqrt(2 * np.pi) * np.exp(-0.5 * x**2 / s / s)
 
     lowQ = np.min(qq)
     highQ = np.max(qq)
@@ -20,7 +20,8 @@ def res(qq, layer, resolution=5):
 
     start = np.log10(lowQ) - 6 * resolution / 2.35482
     finish = np.log10(highQ * (1 + 6 * resolution / 2.35482))
-    interpnum = np.round(np.abs(1 * (np.abs(start - finish)) / (1.7 * resolution / 2.35482 / gaussgpoint)))
+    interpnum = np.round(np.abs(1 * (np.abs(start - finish)) /
+                                (1.7 * resolution / 2.35482 / gaussgpoint)))
     xtemp = np.linspace(start, finish, int(interpnum))
 
     gauss_x = np.linspace(-1.7 * resolution, 1.7 * resolution, gaussnum)

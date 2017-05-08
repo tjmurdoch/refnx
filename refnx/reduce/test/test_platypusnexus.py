@@ -1,11 +1,17 @@
 import unittest
-import refnx.reduce.platypusnexus as plp
-from refnx.reduce import ReducePlatypus, PlatypusNexus
-import numpy as np
 import os
+import numbers
+
+import refnx.reduce.platypusnexus as plp
+from refnx.reduce import PlatypusReduce, PlatypusNexus, basename_datafile
+from refnx.reduce.peak_utils import gauss
+from refnx.reduce.platypusnexus import (fore_back_region, EXTENT_MULT,
+                                        PIXEL_OFFSET)
+from refnx._lib import TemporaryDirectory
+
+import numpy as np
 from numpy.testing import (assert_almost_equal, assert_, assert_equal,
                            assert_array_less, assert_allclose)
-from refnx.reduce.peak_utils import gauss
 import h5py
 
 
@@ -16,10 +22,17 @@ class TestPlatypusNexus(unittest.TestCase):
         self.path = path
 
         self.f113 = PlatypusNexus(os.path.join(self.path,
-                                                   'PLP0011613.nx.hdf'))
+                                               'PLP0011613.nx.hdf'))
         self.f641 = PlatypusNexus(os.path.join(self.path,
-                                                   'PLP0011641.nx.hdf'))
+                                               'PLP0011641.nx.hdf'))
+        self.cwd = os.getcwd()
+        self.tmpdir = TemporaryDirectory()
+        os.chdir(self.tmpdir.name)
         return 0
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        self.tmpdir.cleanup()
 
     def test_chod(self):
         flight_length = self.f113.chod()
@@ -67,8 +80,9 @@ class TestPlatypusNexus(unittest.TestCase):
         yvals = np.ceil(gauss(xvals, 0, 1000, 0, 1))
         detector = np.repeat(yvals[:, np.newaxis], 1000, axis=1).T
         detector_sd = np.sqrt(detector)
-        output = plp.find_specular_ridge(detector[np.newaxis, :], detector_sd[np.newaxis, :])
-        assert_(len(output) == 2)
+        output = plp.find_specular_ridge(detector[np.newaxis, :],
+                                         detector_sd[np.newaxis, :])
+        assert_(len(output) == 5)
         assert_almost_equal(output[0][0], 100)
 
     def test_background_subtract(self):
@@ -83,8 +97,10 @@ class TestPlatypusNexus(unittest.TestCase):
 
         # now make an (N, T, Y) detector image
         n_tbins = 10
-        detector = np.repeat(yvals, n_tbins).reshape(xvals.size, n_tbins).T
-        detector_sd = np.repeat(yvals_sd, n_tbins).reshape(xvals.size, n_tbins).T
+        detector = np.repeat(yvals,
+                             n_tbins).reshape(xvals.size, n_tbins).T
+        detector_sd = np.repeat(yvals_sd,
+                                n_tbins).reshape(xvals.size, n_tbins).T
         detector = detector.reshape(1, n_tbins, xvals.size)
         detector_sd = detector_sd.reshape(1, n_tbins, xvals.size)
 
@@ -123,8 +139,8 @@ class TestPlatypusNexus(unittest.TestCase):
     def test_event_folder(self):
         # When you use event mode processing, make sure the right amount of
         # spectra are created
-        out = self.f113.process(eventmode=[0, 900, 1800], integrate=0,
-                                event_folder=self.path)
+        self.f113.process(eventmode=[0, 900, 1800], integrate=0,
+                          event_folder=self.path)
 
     def test_multiple_acquisitions(self):
         """
@@ -200,19 +216,79 @@ class TestPlatypusNexus(unittest.TestCase):
 
         # it should be processable
         fadd = PlatypusNexus(os.path.join(os.getcwd(),
-                                              'ADD_PLP0000708.nx.hdf'))
+                                          'ADD_PLP0000708.nx.hdf'))
         fadd.process()
 
         # it should also be reduceable
-        reducer = ReducePlatypus(os.path.join(self.path,
-                                            'PLP0000711.nx.hdf'))
-        reduced = reducer.reduce(os.path.join(os.getcwd(), 'ADD_PLP0000708.nx.hdf'))
+        reducer = PlatypusReduce(os.path.join(self.path,
+                                              'PLP0000711.nx.hdf'))
+        reduced = reducer.reduce(os.path.join(os.getcwd(),
+                                              'ADD_PLP0000708.nx.hdf'))
         assert_('ydata' in reduced)
 
         # the error bars should be smaller
         reduced2 = reducer.reduce(os.path.join(self.path, 'PLP0000708.nx.hdf'))
 
         assert_(np.all(reduced['ydata_sd'] < reduced2['ydata_sd']))
+
+    def test_manual_beam_find(self):
+        # you can specify a function that finds where the specular ridge is.
+        def manual_beam_find(detector, detector_sd):
+            beam_centre = np.zeros(len(detector))
+            beam_sd = np.zeros(len(detector))
+            beam_centre += 50
+            beam_sd += 5
+            return beam_centre, beam_sd, np.array([40]), np.array([60]), [[]]
+
+        # the manual beam find is only mandatory when peak_pos == -1.
+        self.f113.process(manual_beam_find=manual_beam_find,
+                          peak_pos=-1)
+        assert_equal(self.f113.processed_spectrum['m_beampos'][0], 50)
+
+        # manual beam finding also specifies the lower and upper pixel of the
+        # foreground
+        assert_equal(self.f113.processed_spectrum['lopx'][0], 40)
+        assert_equal(self.f113.processed_spectrum['hipx'][0], 60)
+
+    def test_fore_back_region(self):
+        # calculation of foreground and background regions is done correctly
+        centres = np.array([100., 90.])
+        sd = np.array([5., 11.5])
+        lopx, hipx, background_pixels = fore_back_region(centres, sd)
+
+        assert_(len(lopx) == 2)
+        assert_(len(hipx) == 2)
+        assert_(len(background_pixels) == 2)
+        assert_(isinstance(lopx[0], numbers.Integral))
+        assert_(isinstance(hipx[0], numbers.Integral))
+
+        calc_lower = np.floor(centres - sd * EXTENT_MULT)
+        assert_equal(lopx, calc_lower)
+        calc_higher = np.ceil(centres + sd * EXTENT_MULT)
+        assert_equal(hipx, calc_higher)
+
+        y1 = np.atleast_1d(
+            np.round(lopx - PIXEL_OFFSET).astype('int'))
+        y0 = np.atleast_1d(
+            np.round(lopx - PIXEL_OFFSET - EXTENT_MULT * sd).astype('int'))
+
+        y2 = np.atleast_1d(
+            np.round(hipx + PIXEL_OFFSET).astype('int'))
+        y3 = np.atleast_1d(
+            np.round(hipx + PIXEL_OFFSET + EXTENT_MULT * sd).astype('int'))
+
+        bp = np.r_[np.arange(y0[0], y1[0] + 1),
+                   np.arange(y2[0], y3[0] + 1)]
+
+        assert_equal(bp, background_pixels[0])
+
+    def test_basename_datafile(self):
+        # check that the right basename is returned
+        pth = 'a/b/c.nx.hdf'
+        assert_(basename_datafile(pth) == 'c')
+
+        pth = 'c.nx.hdf'
+        assert_(basename_datafile(pth) == 'c')
 
 
 if __name__ == '__main__':

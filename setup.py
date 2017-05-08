@@ -13,12 +13,14 @@ else:
     USE_CYTHON = True
 
 packages = find_packages()
-
+idx = packages.index('motofit')
+if idx >= 0:
+    packages.pop(idx)
 
 # versioning
 MAJOR = 0
 MINOR = 0
-MICRO = 5
+MICRO = 7
 ISRELEASED = False
 VERSION = '%d.%d.%d' % (MAJOR, MINOR, MICRO)
 
@@ -116,9 +118,9 @@ info = {
         ],
         'packages': packages,
         'include_package_data': True,
-        'setup_requires': ['numpy', 'scipy', 'lmfit', 'uncertainties'],
+        'setup_requires': ['numpy'],
         'install_requires': ['numpy', 'scipy', 'lmfit', 'emcee',
-                             'uncertainties']
+                             'uncertainties', 'pandas']
         }
 
 ####################################################################
@@ -132,7 +134,8 @@ def setup_package():
     print(info['version'])
 
     if USE_CYTHON:
-        # Obtain the numpy include directory.  This logic works across numpy versions.
+        # Obtain the numpy include directory.  This logic works across numpy
+        # versions.
         ext_modules = []
         HAS_NUMPY = True
 
@@ -151,9 +154,11 @@ def setup_package():
             # creflect extension module
             _creflect = Extension(
                                   name='refnx.analysis._creflect',
-                                  sources=['src/_creflect.pyx', 'src/refcalc.cpp'],
+                                  sources=['src/_creflect.pyx',
+                                           'src/refcalc.cpp'],
                                   include_dirs=[numpy_include],
-                                  language='c',
+                                  language='c++',
+                                  extra_compile_args=[],
                                   extra_link_args=['-lpthread']
                                   # libraries=
                                   # extra_compile_args = "...".split(),
@@ -172,6 +177,7 @@ def setup_package():
 
             info['cmdclass'] = {'build_ext': build_ext}
             info['ext_modules'] = ext_modules
+            info['zip_safe'] = False
 
     try:
         setup(**info)

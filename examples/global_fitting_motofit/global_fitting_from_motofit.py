@@ -76,7 +76,7 @@ def global_fitter_setup(global_pilot_file, dqvals=5.0):
         else:
             _dqvals = dataset.x_err
 
-        c = CurveFitter(ReflectivityFitFunction(T.transform, parallel=True),
+        c = CurveFitter(ReflectivityFitFunction(T.transform, workers=True),
                         (dataset.x, t_data_y, t_data_yerr),
                         parameter,
                         fcn_kws={'dqvals': _dqvals})
@@ -96,7 +96,7 @@ def global_fitter_setup(global_pilot_file, dqvals=5.0):
 
     cons = []
     for col in range(n_datasets):
-        for row in range(len(parameters[col])):
+        for row, val in enumerate(parameters[col]):
             if constraints[row, col] == -1 or is_unique(row, col):
                 continue
             # so it's not unique, but which parameter does it depend on?
@@ -174,7 +174,7 @@ def __resample_mc_iterator(args):
     global_fitter, seed = args
     gf = deepcopy(global_fitter)
     np.random.seed(seed)
-    res = gf._resampleMC(1, 'differential_evolution')
+    res = gf._resample_mc(1, 'differential_evolution')
     return res.mc
 
 

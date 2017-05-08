@@ -3,8 +3,10 @@ A basic representation of a 1D dataset
 """
 from __future__ import division
 
-import numpy as np
 import os.path
+import re
+
+import numpy as np
 
 from refnx.util.nsplice import get_scaling_in_overlap
 
@@ -34,26 +36,34 @@ class Data1D(object):
 
     Attributes
     ----------
-    npoints : the number of points in the dataset
-    data : the data, (x, y, y_err, x_err)
-    finite_data : the data with mask applied
-    x : x data
-    y : y data
-    y_err : uncertainties on the y data
-    x_err : uncertainties on the x data
-
+    data : tuple of np.ndarray
+        The data, (x, y, y_err, x_err)
+    finite_data : tuple of np.ndarray
+        Data points that are finite
+    x : np.ndarray
+        x data
+    y : np.ndarray
+        y data
+    y_err : np.ndarray
+        uncertainties on the y data
+    x_err : np.ndarray
+        uncertainties on the x data
+    filename : str or None
+        The file the data was read from
+    weighted : bool
+        Whether the y data has uncertainties
+    metadata : dict
+        Information that should be retained with the dataset.
     """
-    def __init__(self, data=None):
+    def __init__(self, data=None, **kwds):
         self.filename = None
-        self.fit = None
-        self.params = None
-        self.chisqr = np.inf
-        self.residuals = None
 
+        self.metadata = kwds
         self.x = np.zeros(0)
         self.y = np.zeros(0)
         self.y_err = np.zeros(0)
         self.x_err = np.zeros(0)
+        self.weighted = False
 
         # if it's a file then open and load the file.
         if hasattr(data, 'read') or type(data) is str:
@@ -63,11 +73,16 @@ class Data1D(object):
             self.y = np.array(data[1], dtype=float)
             if len(data) > 2:
                 self.y_err = np.array(data[2], dtype=float)
+                self.weighted = True
+            else:
+                self.y_err = np.ones_like(self.y, dtype=float)
+
             if len(data) > 3:
                 self.x_err = np.array(data[3], dtype=float)
+            else:
+                self.x_err = np.zeros_like(self.x, dtype=float)
 
-    @property
-    def npoints(self):
+    def __len__(self):
         """
         the number of points in the dataset.
         """
@@ -105,16 +120,17 @@ class Data1D(object):
         """
         self.x = np.array(data_tuple[0], dtype=float)
         self.y = np.array(data_tuple[1], dtype=float)
-
+        self.weighted = False
         if len(data_tuple) > 2:
             self.y_err = np.array(data_tuple[2], dtype=float)
+            self.weighted = True
         else:
-            self.y_err = np.ones_like(self.y)
+            self.y_err = np.ones_like(self.y, dtype=float)
 
         if len(data_tuple) > 3:
             self.x_err = np.array(data_tuple[3], dtype=float)
         else:
-            self.x_err = np.zeros(np.size(self.x))
+            self.x_err = np.zeros_like(self.x, dtype=float)
         self.sort()
 
     def scale(self, scalefactor=1.):
@@ -156,6 +172,7 @@ class Data1D(object):
             aydata_sd = np.array(data_tuple[2], dtype=float)
         else:
             aydata_sd = np.ones_like(aydata)
+            self.weighted = False
 
         if len(data_tuple) > 3:
             axdata_sd = np.array(data_tuple[3], dtype=float)
@@ -173,7 +190,7 @@ class Data1D(object):
         # go through and stitch them together.
         scale = 1.
         dscale = 0.
-        if requires_splice and self.npoints > 1:
+        if requires_splice and len(self) > 1:
             scale, dscale, overlap_points = (
                 get_scaling_in_overlap(qq,
                                        rr,
@@ -218,11 +235,6 @@ class Data1D(object):
                                 self.y_err,
                                 self.x_err)))
 
-    def save_fit(self, f):
-        if self.fit is not None:
-            np.savetxt(f, np.column_stack((self.x,
-                                           self.fit)))
-
     def load(self, f):
         """
         Loads a dataset from file. Must be 2 to 4 column ASCII.
@@ -232,7 +244,31 @@ class Data1D(object):
         f : file-handle or string
             File to load the dataset from.
         """
-        self.data = np.loadtxt(f, unpack=True)
+        # see if there are header rows
+        close_file = False
+        try:
+            g = open(f, 'rb')
+            close_file = True
+        except TypeError:
+            # if you're already a file then you'll get a type error
+            g = f
+        finally:
+            header_lines = 0
+            for i, line in enumerate(g):
+                try:
+                    nums = [float(tok) for tok in
+                            re.split('\s|,', line.decode('utf-8'))
+                            if len(tok)]
+                    if len(nums) >= 2:
+                        header_lines = i
+                        break
+                except ValueError:
+                    continue
+            if close_file:
+                g.close()
+
+        self.data = np.loadtxt(f, unpack=True, skiprows=header_lines)
+
         if hasattr(f, 'read'):
             fname = f.name
         else:

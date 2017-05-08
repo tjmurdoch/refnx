@@ -2,7 +2,7 @@ from __future__ import division, print_function
 import numpy as np
 
 
-def abeles(q, layers, scale=1., bkg=0, parallel=True):
+def abeles(q, layers, scale=1., bkg=0, workers=0):
     """
     Abeles matrix formalism for calculating reflectivity from a stratified
     medium.
@@ -29,7 +29,7 @@ def abeles(q, layers, scale=1., bkg=0, parallel=True):
         Multiply all reflectivities by this value.
     bkg: float
         Linear background to be added to all reflectivities
-    parallel: bool
+    workers: int, optional
         <THIS OPTION IS CURRENTLY IGNORED>
 
     Returns
@@ -37,7 +37,6 @@ def abeles(q, layers, scale=1., bkg=0, parallel=True):
     Reflectivity: np.ndarray
         Calculated reflectivity values for each q value.
     """
-
     qvals = np.asfarray(q).ravel()
     nlayers = layers.shape[0] - 2
     npnts = qvals.size
@@ -45,36 +44,49 @@ def abeles(q, layers, scale=1., bkg=0, parallel=True):
     kn = np.zeros((npnts, nlayers + 2), np.complex128)
 
     sld = np.zeros(nlayers + 2, np.complex128)
-    sld[:] += ((layers[:, 1] - layers[0, 1]) + 1j * (layers[:, 2] - layers[0, 2])) * 1.e-6
+    sld[:] += ((layers[:, 1] - layers[0, 1]) +
+               1j * (layers[:, 2] - layers[0, 2])) * 1.e-6
 
     # kn is a 2D array. Rows are Q points, columns are kn in a layer.
-    kn[:] = np.sqrt(qvals[:, np.newaxis]**2. / 4. - 4. * np.pi * sld)
+    # calculate wavevector in each layer, for each Q point.
+    kn[:] = np.sqrt(qvals[:, np.newaxis] ** 2. / 4. - 4. * np.pi * sld)
 
-    # work out the fresnel reflection for each layer
-    rj = (kn[:, :-1] - kn[:, 1:]) / (kn[:, :-1] + kn[:, 1:])
-    rj *= np.exp(kn[:, :-1] * kn[:, 1:] * -2. * layers[1:, 3]**2)
+    # initialise matrix total
+    mrtot00 = 1
+    mrtot11 = 1
+    mrtot10 = 0
+    mrtot01 = 0
+    k = kn[:, 0]
 
-    beta = np.ones((npnts, layers.shape[0] - 1), np.complex128)
+    for idx in range(1, nlayers + 2):
+        k_next = kn[:, idx]
 
-    if nlayers:
-        beta[:, 1:] = np.exp(kn[:, 1: -1] * 1j * np.fabs(layers[1: -1, 0]))
+        # reflectance of an interface
+        rj = (k - k_next) / (k + k_next)
+        rj *= np.exp(k * k_next * -2. * layers[idx, 3] ** 2)
 
-    mrtotal = np.zeros((npnts, 2, 2), np.complex128)
-    mi = np.zeros((npnts, nlayers + 1, 2, 2), np.complex128)
-    mi[:, :, 0, 0] = beta
-    mi[:, :, 1, 1] = 1. / beta
-    mi[:, :, 0, 1] = rj * beta
-    mi[:, :, 1, 0] = rj * mi[:, :, 1, 1]
+        # work out characteristic matrix of layer
+        mi00 = np.exp(k * 1j * np.fabs(layers[idx - 1, 0])) if idx - 1 else 1
+        mi11 = np.exp(k * -1j * np.fabs(layers[idx - 1, 0])) if idx - 1 else 1
 
-    mrtotal[:] = mi[:, 0]
+        mi10 = rj * mi00
+        mi01 = rj * mi11
 
-    for layer in range(1, nlayers + 1):
-        mrtotal = np.einsum('...ij,...jk->...ik', mrtotal, mi[:, layer])
+        # matrix multiply mrtot by characteristic matrix
+        p0 = mrtot00 * mi00 + mrtot10 * mi01
+        p1 = mrtot00 * mi10 + mrtot10 * mi11
+        mrtot00 = p0
+        mrtot10 = p1
 
-    # now work out the reflectivity
-    reflectivity = ((mrtotal[:, 1, 0] * np.conj(mrtotal[:, 1, 0])) /
-                    (mrtotal[:, 0, 0] * np.conj(mrtotal[:, 0, 0])))
+        p0 = mrtot01 * mi00 + mrtot11 * mi01
+        p1 = mrtot01 * mi10 + mrtot11 * mi11
 
+        mrtot01 = p0
+        mrtot11 = p1
+
+        k = k_next
+
+    reflectivity = (mrtot01 * np.conj(mrtot01)) / (mrtot00 * np.conj(mrtot00))
     reflectivity *= scale
     reflectivity += bkg
     return np.real(np.reshape(reflectivity, q.shape))

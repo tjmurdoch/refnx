@@ -1,18 +1,41 @@
 from __future__ import division
-import numpy as np
-from refnx.reduce.platypusnexus import (PlatypusNexus, number_datafile,
-                                        Y_PIXEL_SPACING)
-from refnx.util import ErrorProp as EP
-import refnx.util.general as general
 import string
-from time import gmtime, strftime
-from . import parabolic_motion as pm
-from refnx.dataset import ReflectDataset
 from copy import deepcopy
 import os.path
+from time import gmtime, strftime
+
+import numpy as np
+from refnx.reduce.platypusnexus import (PlatypusNexus, number_datafile,
+                                        Y_PIXEL_SPACING, basename_datafile)
+from refnx.util import ErrorProp as EP
+import refnx.util.general as general
+from .parabolic_motion import (parabola_line_intersection_point,
+                               find_trajectory)
+from refnx.dataset import ReflectDataset
 
 
-class ReducePlatypus(object):
+_template_ref_xml = """<?xml version="1.0"?>
+<REFroot xmlns="">
+<REFentry time="$time">
+<Title>$title</Title>
+<User>$user</User>
+<REFsample>
+<ID>$sample</ID>
+</REFsample>
+<REFdata axes="Qz:Qy" rank="2" type="POINT" \
+spin="UNPOLARISED" dim="$_numpointsz:$_numpointsy">
+<Run filename="$_rnumber" preset="" size="">
+</Run>
+<R uncertainty="dR">$_r</R>
+<Qz uncertainty="dQz" units="1/A">$_qz</Qz>
+<dR type="SD">$_dr</dR>
+<Qy type="_FWHM" units="1/A">$_qy</Qy>
+</REFdata>
+</REFentry>
+</REFroot>"""
+
+
+class PlatypusReduce(object):
     """
     Reduces Platypus reflectometer data to give the specular reflectivity.
     Offspecular data maps are also produced.
@@ -56,8 +79,10 @@ class ReducePlatypus(object):
 
         if isinstance(direct, PlatypusNexus):
             self.direct_beam = direct
-        else:
+        elif type(direct) is str:
             direct = os.path.join(self.data_folder, direct)
+            self.direct_beam = PlatypusNexus(direct)
+        else:
             self.direct_beam = PlatypusNexus(direct)
 
         if reflect is not None:
@@ -104,6 +129,8 @@ class ReducePlatypus(object):
                 Specular Reflectivity, shape (N, T)
             - 'ydata_sd' : np.ndarray
                 Uncertainty in specular reflectivity (SD), shape (N, T)
+            - 'omega' : np.ndarray
+                Angle of incidence, shape (N, T)
             - 'm_ref' : np.ndarray
                 Offspecular reflectivity map, shape (N, T, Y)
             - 'm_ref_sd' : np.ndarray
@@ -114,8 +141,10 @@ class ReducePlatypus(object):
                 Qy for offspecular map, shape (N, T, Y)
             - 'n_spectra' : int
                 number of reflectivity spectra
-            - 'datafile_number': int
+            - 'datafile_number' : int
                 run number for the reflected beam
+            - 'fname' : list
+                the saved filenames
 
         N corresponds to the number of spectra
         T corresponds to the number of Q (wavelength) bins
@@ -125,30 +154,42 @@ class ReducePlatypus(object):
         -----
         All the values returned from this method are also contained as instance
         attributes for this object.
+
+        Examples
+        --------
+
+        >>> from refnx.reduce import PlatypusReduce
+        >>> # set up with a direct beam
+        >>> reducer = PlatypusReduce('PLP0000711.nx.hdf')
+        >>> reduction = reducer.reduce('PLP0000708.nx.hdf', rebin_percent=3.)
         """
-        keywords = kwds.copy()
-        keywords['direct'] = False
-
-        # get the reflected beam spectrum
-        if isinstance(reflect, PlatypusNexus):
-            self.reflected_beam = reflect
-        else:
-            reflect = os.path.join(self.data_folder, reflect)
-            self.reflected_beam = PlatypusNexus(reflect)
-
-        self.reflected_beam.process(**keywords)
+        reflect_keywords = kwds.copy()
+        direct_keywords = kwds.copy()
 
         # get the direct beam spectrum
-        keywords['direct'] = True
-        keywords['integrate'] = -1
+        direct_keywords['direct'] = True
+        direct_keywords['integrate'] = -1
 
-        if 'eventmode' in keywords:
-            keywords.pop('eventmode')
+        if 'eventmode' in direct_keywords:
+            direct_keywords.pop('eventmode')
 
-        # got to use the same wavelength bins as the reflected spectrum.
-        keywords['wavelength_bins'] = self.reflected_beam.m_lambda_hist[0]
+        self.direct_beam.process(**direct_keywords)
 
-        self.direct_beam.process(**keywords)
+        # get the reflected beam spectrum
+        reflect_keywords['direct'] = False
+        if isinstance(reflect, PlatypusNexus):
+            self.reflected_beam = reflect
+        elif type(reflect) is str:
+            reflect = os.path.join(self.data_folder, reflect)
+            self.reflected_beam = PlatypusNexus(reflect)
+        else:
+            self.reflected_beam = PlatypusNexus(reflect)
+
+        # Got to use the same wavelength bins as the direct spectrum.
+        # done this way around to save processing direct beam over and over
+        reflect_keywords['wavelength_bins'] = self.direct_beam.m_lambda_hist[0]
+
+        self.reflected_beam.process(**reflect_keywords)
 
         self.save = save
         reduction = self._reduce_single_angle(scale)
@@ -157,7 +198,7 @@ class ReducePlatypus(object):
     def data(self, scanpoint=0):
         """
         The specular reflectivity
-        
+
         Parameters
         ----------
         scanpoint: int
@@ -177,11 +218,11 @@ class ReducePlatypus(object):
     def data2d(self, scanpoint=0):
         """
         The offspecular data
-        
+
         Parameters
         ----------
         scanpoint: int
-            Find a particular offspecular image. scanpoints upto 
+            Find a particular offspecular image. scanpoints upto
             self.n_spectra - 1 can be specified.
 
         Returns
@@ -197,7 +238,7 @@ class ReducePlatypus(object):
     def scale(self, scale):
         """
         Divides the reflectivity values by this scale factor
-        
+
         Parameters
         ----------
         scale: float
@@ -209,31 +250,13 @@ class ReducePlatypus(object):
         self.ydata_sd /= scale
 
     def write_offspecular(self, f, scanpoint=0):
-        __template_ref_xml = """<?xml version="1.0"?>
-        <REFroot xmlns="">
-        <REFentry time="$time">
-        <Title>$title</Title>
-        <User>$user</User>
-        <REFsample>
-        <ID>$sample</ID>
-        </REFsample>
-        <REFdata axes="Qz:Qy" rank="2" type="POINT" spin="UNPOLARISED" dim="$_numpointsz:$_numpointsy">
-        <Run filename="$_rnumber" preset="" size="">
-        </Run>
-        <R uncertainty="dR">$_r</R>
-        <Qz uncertainty="dQz" units="1/A">$_qz</Qz>
-        <dR type="SD">$_dr</dR>
-        <Qy type="_FWHM" units="1/A">$_qy</Qy>
-        </REFdata>
-        </REFentry>
-        </REFroot>"""
         d = dict()
         d['time'] = strftime("%a, %d %b %Y %H:%M:%S +0000", gmtime())
         d['_rnumber'] = self.reflected_beam.datafile_number
         d['_numpointsz'] = np.size(self.m_ref, 1)
         d['_numpointsy'] = np.size(self.m_ref, 2)
 
-        s = string.Template(__template_ref_xml)
+        s = string.Template(_template_ref_xml)
 
         # filename = 'off_PLP{:07d}_{:d}.xml'.format(self._rnumber, index)
         d['_r'] = repr(self.m_ref[scanpoint].tolist()).strip(',[]')
@@ -269,18 +292,19 @@ class ReducePlatypus(object):
         wavelengths = self.reflected_beam.m_lambda
         m_twotheta = np.zeros((n_spectra, n_tpixels, n_ypixels))
 
+        detector_z_difference = (self.reflected_beam.detector_z -
+                                 self.direct_beam.detector_z)
+
+        beampos_z_difference = (self.reflected_beam.m_beampos -
+                                self.direct_beam.m_beampos)
+
+        total_z_deflection = (detector_z_difference +
+                              beampos_z_difference * Y_PIXEL_SPACING)
+
         if mode in ['FOC', 'POL', 'POLANAL', 'MT']:
-            detector_z_difference = (self.reflected_beam.detector_z -
-                                     self.direct_beam.detector_z)
-            beampos_z_difference = (self.reflected_beam.m_beampos
-                                    - self.direct_beam.m_beampos)
-
-            total_z_deflection = (detector_z_difference
-                                  + beampos_z_difference * Y_PIXEL_SPACING)
-
             # omega_nom.shape = (N, )
-            omega_nom = np.degrees(np.arctan(total_z_deflection
-                                   / self.reflected_beam.detector_y) / 2.)
+            omega_nom = np.degrees(np.arctan(total_z_deflection /
+                                   self.reflected_beam.detector_y) / 2.)
 
             '''
             Wavelength specific angle of incidence correction
@@ -294,40 +318,60 @@ class ReducePlatypus(object):
             '''
             speeds = general.wavelength_velocity(wavelengths)
             collimation_distance = self.reflected_beam.cat.collimation_distance
-            s2_sample_distance = (self.reflected_beam.cat.sample_distance
-                                  - self.reflected_beam.cat.slit2_distance)
+            s2_sample_distance = (self.reflected_beam.cat.sample_distance -
+                                  self.reflected_beam.cat.slit2_distance)
 
             # work out the trajectories of the neutrons for them to pass
             # through the collimation system.
-            trajectories = pm.find_trajectory(collimation_distance / 1000.,
-                                              0, speeds)
-            
+            trajectories = find_trajectory(collimation_distance / 1000.,
+                                           0, speeds)
+
             # work out where the beam hits the sample
-            res = pm.parabola_line_intersection_point(s2_sample_distance / 1000,
-                                                      0,
-                                                      trajectories,
-                                                      speeds,
-                                                      omega_nom[:, np.newaxis])
+            res = parabola_line_intersection_point(s2_sample_distance / 1000,
+                                                   0,
+                                                   trajectories,
+                                                   speeds,
+                                                   omega_nom[:, np.newaxis])
             intersect_x, intersect_y, x_prime, elevation = res
 
             # correct the angle of incidence with a wavelength dependent
             # elevation.
             omega_corrected = omega_nom[:, np.newaxis] - elevation
 
-        elif mode == 'SB' or mode == 'DB':
-            omega = self.reflected_beam.M_beampos + self.reflected_beam.detectorZ[:, np.newaxis]
-            omega -= self.direct_beam.M_beampos + self.direct_beam.detectorZ
-            omega /= 2 * self.reflected_beam.detectorY[:, np.newaxis, np.newaxis]
-            omega = np.arctan(omega)
+            m_twotheta += np.arange(n_ypixels * 1.)[np.newaxis, np.newaxis, :]
+            m_twotheta -= self.direct_beam.m_beampos[:, np.newaxis, np.newaxis]
+            m_twotheta *= Y_PIXEL_SPACING
+            m_twotheta += detector_z_difference
+            m_twotheta /= (
+                self.reflected_beam.detector_y[:, np.newaxis, np.newaxis])
+            m_twotheta = np.arctan(m_twotheta)
+            m_twotheta = np.degrees(m_twotheta)
 
-            m_twotheta += np.arange(n_ypixels * 1.)[np.newaxis, np.newaxis, :] * Y_PIXEL_SPACING
-            m_twotheta += self.reflected_beam.detectorZ[:, np.newaxis, np.newaxis]
-            m_twotheta -= self.direct_beam.M_beampos[:, :, np.newaxis] + self.direct_beam.detectorZ
-            m_twotheta -= self.reflected_beam.detectorY[:, np.newaxis, np.newaxis] * np.tan(omega[:, :, np.newaxis])
+            # you may be reflecting upside down, reverse the sign.
+            upside_down = np.sign(omega_corrected[:, 0])
+            m_twotheta *= upside_down[:, np.newaxis, np.newaxis]
+            omega_corrected *= upside_down[:, np.newaxis]
 
-            m_twotheta /= self.reflected_beam.detectorY[:, np.newaxis, np.newaxis]
+        elif mode in ['SB', 'DB']:
+            omega = np.arctan(total_z_deflection /
+                              self.reflected_beam.detector_y) / 2.
+
+            m_twotheta += np.arange(n_ypixels * 1.)[np.newaxis, np.newaxis, :]
+            m_twotheta -= self.direct_beam.m_beampos[:, :, np.newaxis]
+            # m_theta *= Y_PIXEL_SPACING
+            m_twotheta += detector_z_difference
+            m_twotheta -= (
+                self.reflected_beam.detector_y[:, np.newaxis, np.newaxis] *
+                np.tan(omega[:, :, np.newaxis]))
+
+            m_twotheta /= (
+                self.reflected_beam.detector_y[:, np.newaxis, np.newaxis])
             m_twotheta = np.arctan(m_twotheta)
             m_twotheta += omega[:, :, np.newaxis]
+
+            # still in radians at this point
+            omega_corrected = np.degrees(omega)
+            m_twotheta = np.degrees(m_twotheta)
 
         '''
         --Specular Reflectivity--
@@ -347,10 +391,10 @@ class ReducePlatypus(object):
 
         # calculate the 1D Qz values.
         xdata = general.q(omega_corrected, wavelengths)
-        xdata_sd = (self.reflected_beam.m_lambda_fwhm
-                    / self.reflected_beam.m_lambda) ** 2
-        xdata_sd += (self.reflected_beam.domega[:, np.newaxis]
-                     / omega_corrected) ** 2
+        xdata_sd = (self.reflected_beam.m_lambda_fwhm /
+                    self.reflected_beam.m_lambda) ** 2
+        xdata_sd += (self.reflected_beam.domega[:, np.newaxis] /
+                     omega_corrected) ** 2
         xdata_sd = np.sqrt(xdata_sd) * xdata
 
         '''
@@ -358,14 +402,15 @@ class ReducePlatypus(object):
         normalise the counts in the reflected beam by the direct beam
         spectrum this gives a reflectivity. Also propagate the errors,
         leaving the fractional variance (dr/r)^2.
-        --Note-- that adjacent y-pixels (same wavelength) are correlated in this
-        treatment, so you can't just sum over them.
+        --Note-- that adjacent y-pixels (same wavelength) are correlated in
+        this treatment, so you can't just sum over them.
         i.e. (c_0 / d) + ... + c_n / d) != (c_0 + ... + c_n) / d
         '''
-        m_ref, m_ref_sd = EP.EPdiv(self.reflected_beam.m_topandtail,
-                                   self.reflected_beam.m_topandtail_sd,
-                                   self.direct_beam.m_spec[:, :, np.newaxis],
-                                   self.direct_beam.m_spec_sd[:, :, np.newaxis])
+        m_ref, m_ref_sd = EP.EPdiv(
+            self.reflected_beam.m_topandtail,
+            self.reflected_beam.m_topandtail_sd,
+            self.direct_beam.m_spec[:, :, np.newaxis],
+            self.direct_beam.m_spec_sd[:, :, np.newaxis])
 
         # you may have had divide by zero's.
         m_ref = np.where(np.isinf(m_ref), 0, m_ref)
@@ -384,6 +429,7 @@ class ReducePlatypus(object):
         reduction['xdata_sd'] = self.xdata_sd = xdata_sd
         reduction['ydata'] = self.ydata = ydata
         reduction['ydata_sd'] = self.ydata_sd = ydata_sd
+        reduction['omega'] = omega_corrected
         reduction['m_ref'] = self.m_ref = m_ref
         reduction['m_ref_sd'] = self.m_ref_sd = m_ref_sd
         reduction['qz'] = self.m_qz = qz
@@ -395,14 +441,19 @@ class ReducePlatypus(object):
 
         fnames = []
         if self.save:
+            datafilename = self.reflected_beam.datafilename
+            datafilename = os.path.basename(datafilename.split('.nx.hdf')[0])
+
             for i in range(n_spectra):
                 data_tup = self.data(scanpoint=i)
                 dataset = ReflectDataset(data_tup)
-                fname = 'PLP{0:07d}_{1}.dat'.format(self.datafile_number, i)
+
+                fname = '{0}_{1}.dat'.format(datafilename, i)
                 fnames.append(fname)
                 with open(fname, 'wb') as f:
                     dataset.save(f)
-                fname = 'PLP{0:07d}_{1}.xml'.format(self.datafile_number, i)
+
+                fname = '{0}_{1}.xml'.format(datafilename, i)
                 with open(fname, 'wb') as f:
                     dataset.save_xml(f,
                                      start_time=reduction['start_time'][i])
@@ -466,7 +517,7 @@ def reduce_stitch(reflect_list, direct_list, norm_file_num=None,
         direct_datafile = os.path.join(data_folder,
                                        number_datafile(val[1]))
 
-        reduced = ReducePlatypus(direct_datafile,
+        reduced = PlatypusReduce(direct_datafile,
                                  reflect=reflect_datafile,
                                  save=save,
                                  **kwds)
@@ -479,14 +530,20 @@ def reduce_stitch(reflect_list, direct_list, norm_file_num=None,
 
     fname = None
     if save:
-        fname = 'c_PLP{0:07d}.dat'.format(reflect_list[0])
-        with open(fname, 'wb') as f:
+        # this will give us <fname>.nx.hdf
+        # if reflect_list was an integer you'll get PLP0000708.nx.hdf
+        fname = number_datafile(reflect_list[0])
+        # now chop off .nx.hdf extension
+        fname = basename_datafile(fname)
+
+        fname_dat = 'c_{0}.dat'.format(fname)
+        with open(fname_dat, 'wb') as f:
             combined_dataset.save(f)
-        fname = 'c_PLP{0:07d}.xml'.format(reflect_list[0])
-        with open(fname, 'wb') as f:
+        fname_xml = 'c_{0}.xml'.format(fname)
+        with open(fname_xml, 'wb') as f:
             combined_dataset.save_xml(f)
 
-    return combined_dataset, fname
+    return combined_dataset, fname_dat
 
 
 if __name__ == "__main__":
@@ -497,4 +554,3 @@ if __name__ == "__main__":
     a.save('test1.dat')
 
     print(strftime("%a, %d %b %Y %H:%M:%S +0000", gmtime()))
-

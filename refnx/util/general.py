@@ -7,11 +7,11 @@ from __future__ import division
 import numpy as np
 from scipy import stats, integrate, constants, optimize
 
-#h / m = 3956
+# h / m = 3956
 K = constants.h / constants.m_n * 1.e10
 
 
-def div(d1, d2, L12 = 2859):
+def div(d1, d2, L12=2859):
     """
     Calculate the angular resolution for a set of collimation conditions
 
@@ -36,10 +36,10 @@ def div(d1, d2, L12 = 2859):
     value you need to use.
     See equations 11-14 in [1]_.
 
-    .. [1] de Haan, V.-O.; de Blois, J.; van der Ende, P.; Fredrikze, H.; van der
-    Graaf, A.; Schipper, M.; van Well, A. A. & J., v. d. Z. ROG, the neutron
-    reflectometer at IRI Delft Nuclear Instruments and Methods in Physics
-    Research A, 1995, 362, 434-453
+    .. [1] de Haan, V.-O.; de Blois, J.; van der Ende, P.; Fredrikze, H.;
+    van der Graaf, A.; Schipper, M.; van Well, A. A. & J., v. d. Z. ROG, the
+    neutron reflectometer at IRI Delft Nuclear Instruments and Methods in
+    Physics Research A, 1995, 362, 434-453
     """
     divergence = 0.68 * 0.68 * (d1 ** 2 + d2 ** 2) / (L12 ** 2)
     alpha = (d1 + d2) / 2. / L12
@@ -66,7 +66,6 @@ def q(angle, wavelength):
     return 4 * np.pi * np.sin(np.radians(angle)) / wavelength
 
 
-@np.vectorize
 def q2(omega, twotheta, phi, wavelength):
     """
     convert angles and wavelength (lambda) to Q vector.
@@ -101,8 +100,8 @@ def q2(omega, twotheta, phi, wavelength):
     phi = np.radians(phi)
 
     qx = 2 * np.pi / wavelength * np.cos(twotheta - omega) * np.sin(phi)
-    qy = (2 * np.pi / wavelength * (np.cos(twotheta - omega) * np.cos(phi)
-          - np.cos(omega)))
+    qy = (2 * np.pi / wavelength * (np.cos(twotheta - omega) * np.cos(phi) -
+          np.cos(omega)))
     qz = 2 * np.pi / wavelength * (np.sin(twotheta - omega) + np.sin(omega))
 
     return qx, qy, qz
@@ -124,16 +123,26 @@ def wavelength(q, angle):
     wavelength : float
         Wavelength of radiation (A)
     """
-    return 4. * np.pi * np.sin(angle * np.pi / 180.)/q
+    return 4. * np.pi * np.sin(angle * np.pi / 180.) / q
 
 
 def angle(q, wavelength):
     """
     calculate angle given Q and wavelength
-    q - wavevector (A^-1)
-    wavelength -  wavelength of radiation (Angstrom)
+
+    Parameters
+    ----------
+    q : float
+        Wavevector (A**-1)
+    wavelength : float
+        Wavelength of radiation (A)
+
+    Returns
+    -------
+    angle : float
+        angle of incidence (degrees)
     """
-    return  np.arcsin(q / 4. / np.pi * wavelength) * 180 / np.pi
+    return np.arcsin((q * wavelength) / 4. / np.pi) * 180 / np.pi
 
 
 def qcrit(SLD1, SLD2):
@@ -425,14 +434,14 @@ def xray_wavelength(energy):
     """
     convert energy (keV) to wavelength (angstrom)
     """
-    return 12.398/ energy
+    return 12.398 / energy
 
 
 def xray_energy(wavelength):
     """
     convert energy (keV) to wavelength (angstrom)
     """
-    return 12.398/ wavelength
+    return 12.398 / wavelength
 
 
 def penetration_depth(qq, rho):
@@ -544,7 +553,8 @@ def height_of_beam_after_dx(d1, d2, L12, distance):
     if distance >= 0:
         return (beta * distance * 2) + d2, (alpha * distance * 2) + d2
     else:
-        return (beta * abs(distance) * 2) + d1, (alpha * abs(distance) * 2) + d1
+        return ((beta * abs(distance) * 2) + d1,
+                (alpha * abs(distance) * 2) + d1)
 
 
 def actual_footprint(d1, d2, L12, L2S, angle):
@@ -571,19 +581,20 @@ def actual_footprint(d1, d2, L12, L2S, angle):
 
     """
     umbra, penumbra = height_of_beam_after_dx(d1, d2, L12, L2S)
-    return  umbra / np.radians(angle), penumbra / np.radians(angle)
+    return umbra / np.radians(angle), penumbra / np.radians(angle)
 
 
 def slit_optimiser(footprint,
-                  resolution,
-                  angle = 1.,
-                  L12 = 2859.5,
-                  L2S = 180,
-                  LS3 = 290.5,
-                  LSD = 2500,
-                  verbose = True):
+                   resolution,
+                   angle=1.,
+                   L12=2859.5,
+                   L2S=180,
+                   LS3=290.5,
+                   LSD=2500,
+                   verbose=True):
     """
-    Optimise slit settings for a given angular resolution, and a given footprint.
+    Optimise slit settings for a given angular resolution, and a given
+    footprint.
 
     footprint: float
         maximum footprint onto sample (mm)
@@ -600,10 +611,14 @@ def slit_optimiser(footprint,
         print('fractional angular resolution (FWHM):', resolution)
         print('theta:', angle, 'degrees')
 
-    d1star = lambda d2star : np.sqrt(1 - np.power(d2star, 2))
-    L1star = 0.68 * footprint/L12/resolution
+    def d1star(d2star):
+        return np.sqrt(1 - np.power(d2star, 2))
 
-    gseekfun = lambda d2star : np.power((d2star + L2S / L12 * (d2star + d1star(d2star))) - L1star, 2)
+    L1star = 0.68 * footprint / L12 / resolution
+
+    def gseekfun(d2star):
+        return np.power((d2star + L2S / L12 * (d2star + d1star(d2star))) -
+                        L1star, 2)
 
     res = optimize.minimize_scalar(gseekfun, method='bounded', bounds=(0, 1))
     if res['success'] is False:
@@ -613,10 +628,11 @@ def slit_optimiser(footprint,
     optimal_d2star = res['x']
     optimal_d1star = d1star(optimal_d2star)
     if optimal_d2star > optimal_d1star:
-        # you found a minimum, but this may not be the optimum size of the slits.
+        # you found a minimum, but this may not be the optimum size of the
+        # slits.
         multfactor = 1
-        optimal_d2star = 1/np.sqrt(2)
-        optimal_d1star = 1/np.sqrt(2)
+        optimal_d2star = 1 / np.sqrt(2)
+        optimal_d1star = 1 / np.sqrt(2)
     else:
         multfactor = optimal_d2star / optimal_d1star
 
@@ -630,9 +646,11 @@ def slit_optimiser(footprint,
     if verbose:
         print('OUTPUT')
         if multfactor == 1:
-            print('Your desired resolution results in a smaller footprint than the sample supports.')
-            suggested_resolution =  resolution * footprint / _actual_footprint
-            print('You can increase flux using a resolution of', suggested_resolution, 'and still keep the same footprint.')
+            print('Your desired resolution results in a smaller footprint than'
+                  ' the sample supports.')
+            suggested_resolution = resolution * footprint / _actual_footprint
+            print('You can increase flux using a resolution of',
+                  suggested_resolution, 'and still keep the same footprint.')
         print('d1', d1, 'mm')
         print('d2', d2, 'mm')
         print('footprint:', _actual_footprint, 'mm')
@@ -642,3 +660,41 @@ def slit_optimiser(footprint,
         print('_____________________________________________')
 
     return d1, d2
+
+
+def _dict_compare(d1, d2):
+    """
+    Rudimentary check to see if two dict are the same. This won't do recursive
+    checking (e.g. if items in d1 or d2 are dicts)
+
+    Parameters
+    ----------
+    d1 : dict
+    d2 : dict
+
+    Returns
+    -------
+    truth : bool
+        Are two dicts the same
+    """
+    if len(d1) != len(d2):
+        return False
+
+    d1_keys = set(d1.keys())
+    d2_keys = set(d2.keys())
+    intersect_keys = d1_keys.intersection(d2_keys)
+    if len(intersect_keys) != len(d1):
+        return False
+
+    for o in intersect_keys:
+        if (isinstance(d1[o], np.ndarray) and
+                isinstance(d2[o], np.ndarray)):
+            # both numpy arrays
+            if not np.array_equal(d1[o], d2[o]):
+                return False
+            continue
+
+        if not isinstance(d1[o], d2[o].__class__) or d1[o] != d2[o]:
+            return False
+
+    return True

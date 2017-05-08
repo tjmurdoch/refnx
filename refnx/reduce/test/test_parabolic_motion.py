@@ -1,8 +1,9 @@
 import numpy as np
 import unittest
-from numpy.testing import (assert_almost_equal, assert_equal, assert_)
+from numpy.testing import (assert_almost_equal, assert_)
 from scipy import constants
 import refnx.reduce.parabolic_motion as pm
+
 
 class TestParabolicMotion(unittest.TestCase):
 
@@ -34,7 +35,7 @@ class TestParabolicMotion(unittest.TestCase):
         # the angle needs to be 45 degrees for a projectile passing
         # through x = 9177 / 2, arctan(peak_height / 9177 * 2)
         peak_height = (300 * np.sin(np.radians(45.))) ** 2 / 2. / constants.g
-        assert_equal(peak_height, 2294.3614792003382)
+        assert_almost_equal(peak_height, 2294.3614792003382)
         theta = np.degrees(np.arctan(peak_height / 9177.4459168013527 * 2.))
 
         traj = pm.find_trajectory(9177.4459168013527 / 2., theta, 300.)
