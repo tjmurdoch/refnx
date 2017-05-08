@@ -81,7 +81,7 @@ class Brush(AnalyticalReflectivityFunction):
         #Generate points vector between SiO2 and last layer and re-evaluate
         #SLD profile
         points = np.linspace(lmfit_values['thickness_SiO2'], end, num=1001)
-        z, profile = self.sld_profile(params, points=points)
+        z, profile = self.sld_profile(params, z=points)
 
         #Convert SLD profile to volume fraction and zero z values at extent of
         #SiO2 layer

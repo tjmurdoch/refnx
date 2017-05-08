@@ -139,9 +139,15 @@ class Brush(AnalyticalReflectivityFunction):
 
         Returns
         -------
-        parameter names
+        int_par: list
+            list of parameter names for n interior layers up to n_interior
+            thickness_i:
+                thickness of ith layer
+            phi_i
+                volume fraction of ith layer
+            roughness_i
+                roughness between ith and ith-1 layer
         """
-        # TODO list the parameter names.
         int_par = ",".join(['thickness_%d,phi_%d,roughness_%d' %
                             (i + 1, i + 1, i + 1) for i in range(self.n_interior)]).split(',')
 
@@ -151,6 +157,11 @@ class Brush(AnalyticalReflectivityFunction):
 class BrushPara(Brush):
     """
     Class adds parabolic functional form for the tail (doi: 10.1002/macp.201300477)
+
+    Parameters
+    ----------
+
+
     """
     # TODO list the exact parameter names in the class docstring
     # Parameters needed for parabolic tail
